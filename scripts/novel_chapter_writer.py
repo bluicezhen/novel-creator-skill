@@ -329,12 +329,12 @@ class ContextExtractor:
         style_file = self.memory_dir / "style_anchor.md"
         if not style_file.exists():
             return {}
-        
+
         content = style_file.read_text(encoding='utf-8', errors='ignore')
-        
+
         # 提取风格要素
         style_info = {}
-        
+
         # 解析叙事视角（兼容 "视角：" 和旧版 "叙述视角：" 两种格式）
         perspective_match = (
             re.search(r'(?<!叙述)视角[：:]\s*(.+)', content)
@@ -356,10 +356,34 @@ class ContextExtractor:
         dialogue_match = re.search(r'对话[：:]\s*(.+)', content)
         if dialogue_match:
             style_info['dialogue_style'] = dialogue_match.group(1).strip()
-        
-        # 保留原始内容
+
+        # 保留原始内容（用于提取禁词）
         style_info['raw_content'] = content[:1500]
-        
+
+        # 解析禁止句式
+        forbidden_patterns = []
+        section_match = re.search(r'## 禁止句式\s*\n(.*?)(?=##|$)', content, re.DOTALL)
+        if section_match:
+            section_text = section_match.group(1)
+            for line in section_text.split('\n'):
+                line = line.strip()
+                if line and not line.startswith('#') and not line.startswith('-'):
+                    forbidden_patterns.append(line)
+
+        # 解析禁止词汇
+        forbidden_words = []
+        vocab_match = re.search(r'## 禁止词汇\s*\n(.*?)(?=##|$)', content, re.DOTALL)
+        if vocab_match:
+            section_text = vocab_match.group(1)
+            for line in section_text.split('\n'):
+                match = re.match(r'\|\s*([^\|]+)\s*\|', line.strip())
+                if match:
+                    word = match.group(1).strip()
+                    forbidden_words.append(word)
+
+        style_info['forbidden_patterns'] = forbidden_patterns
+        style_info['forbidden_words'] = forbidden_words
+
         return style_info
     
     def extract_context(self, chapter_file: Path, context_window: int = 5) -> ProjectContext:
@@ -457,11 +481,38 @@ class PromptGenerator:
         return self.ctx.novel_plan.get("target_chars", 3500) or 3500
 
     def _hard_rules(self) -> str:
-        return (
+        """返回硬约束规则，包含从 style_anchor.md 解析的禁忌清单"""
+        base = (
             "输出纯小说正文。不得在正文中出现任何写作分析、角色定位说明、"
             "创作思路注记、标题行或 Markdown 标记。"
             "对话必须体现各角色的不同性格，不允许对话同质化。"
         )
+
+        # 从 style_anchor 读取禁忌清单
+        s = self.ctx.style_anchor
+        if not s:
+            return base
+
+        forbidden_items = []
+        # 添加禁止句式
+        if s.get("forbidden_patterns"):
+            patterns = s["forbidden_patterns"]
+            if patterns:
+                forbidden_items.append("## 禁止句式")
+                for pattern in patterns[:5]:  # 最多取5个，避免过长
+                    forbidden_items.append(f"- 禁止使用：{pattern}")
+
+        # 添加禁止词汇
+        if s.get("forbidden_words"):
+            words = s["forbidden_words"]
+            if words:
+                forbidden_items.append("## 禁止词汇")
+                for word in words[:8]:  # 最多取8个，避免过长
+                    forbidden_items.append(f"- 禁止使用：{word}")
+
+        if forbidden_items:
+            return base + "\n\n## 风格禁词\n" + "\n".join(forbidden_items)
+        return base
 
     # ------------------------------------------------------------------
     # 8 种入口模式
