@@ -316,7 +316,10 @@ def _next_action(state: Dict[str, Any]) -> Dict[str, Any]:
         # 写作指令
         action["commands"].extend([
             f"python3 {SCRIPT_DIR / 'novel_flow_executor.py'} continue-write "
-            f"--project-root <PROJECT_ROOT> --query \"<第{next_ch}章剧情>\"",
+            f"--project-root <PROJECT_ROOT> --query \"<第{next_ch}章剧情>\" --phase prepare",
+            "# → 读取输出JSON，执行writing_tasks中的写作任务 → 写入章节文件",
+            f"python3 {SCRIPT_DIR / 'novel_flow_executor.py'} continue-write "
+            f"--project-root <PROJECT_ROOT> --query \"<第{next_ch}章剧情>\" --phase finalize",
             f"写作完成后执行: python3 {SCRIPT_DIR / 'auto_novel_writer.py'} progress "
             f"--project-root <PROJECT_ROOT> --chapter {next_ch} --chars-added <字数> --gate-passed",
         ])

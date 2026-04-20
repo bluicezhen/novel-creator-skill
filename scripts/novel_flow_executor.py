@@ -117,32 +117,6 @@ def _extract_event_types_from_constraints(constraints: object) -> List[str]:
     return [str(t) for t in rec_types if str(t) in _VALID_EVENT_TYPES]
 
 
-# 环境变量：标记当前是否在 Claude Code / Codex 等 CLI 工具中运行
-# 设置此变量后，系统将使用 MCP Codex 工具进行写作，无需外部 API Key
-_CLAUDE_CODE_MODE = os.environ.get("CLAUDE_CODE_MODE", "") or os.environ.get("CODEX_MODE", "")
-
-
-def _has_llm_config(args: argparse.Namespace, project_root: Path) -> bool:
-    """Check if LLM configuration is available for writing."""
-    # 优先检查是否在 Claude Code / Codex 模式下
-    if _CLAUDE_CODE_MODE:
-        return True
-    if getattr(args, "llm_provider", None) or getattr(args, "llm_api_key", None):
-        return True
-    if os.environ.get("NOVEL_LLM_PROVIDER") or os.environ.get("NOVEL_AI_PROVIDER"):
-        return True
-    return (project_root / ".novel_writer_config.yaml").exists()
-
-
-def _resolve_draft_provider(args: argparse.Namespace, project_root: Path) -> str:
-    """Resolve draft provider: auto -> llm (if configured) or template."""
-    raw = str(getattr(args, "draft_provider", "auto") or "auto")
-    if raw in {"template", "llm"}:
-        return raw
-    # Claude Code 模式下默认使用 llm（通过 MCP Codex）
-    if _CLAUDE_CODE_MODE:
-        return "llm"
-    return "llm" if _has_llm_config(args, project_root) else "template"
 
 
 def _split_sentences(paragraph: str) -> List[str]:
@@ -220,29 +194,7 @@ def _write_with_mcp_codex(
     chapter_path: Path,
     prompt: str,
 ) -> bool:
-    """Write chapter using MCP Codex tool (Claude Code integration).
-
-    This function is called when CLAUDE_CODE_MODE is enabled, allowing
-    the system to use the current Claude Code session for writing without
-    requiring external API keys.
-
-    Returns True on success.
-    """
-    # This is a placeholder that signals the orchestrator to use MCP Codex
-    # The actual MCP call is handled by the calling code (Claude Code agent)
-    # We write a signal file that the agent can detect and respond to
-    signal_file = project_root / ".flow" / "mcp_write_request.json"
-    ensure_dir(signal_file.parent)
-
-    signal_data = {
-        "chapter_path": str(chapter_path),
-        "prompt": prompt,
-        "timestamp": dt.datetime.now().isoformat(),
-    }
-    write_json(signal_file, signal_data)
-
-    # Return False to indicate this needs to be handled by the caller
-    # The actual MCP Codex call will be made by the Claude Code agent
+    """[已废弃] 纯 Skill 模式下不需要此函数，保留空壳以防外部引用。"""
     return False
 
 
@@ -251,33 +203,20 @@ def _rewrite_chapter_with_llm(
     chapter_path: Path,
     args: argparse.Namespace,
     prompt: str,
-) -> bool:
-    """Rewrite chapter using LLM for pacing issues. Returns True on success."""
-    if not _has_llm_config(args, project_root):
-        return False
+) -> Dict[str, Any]:
+    """输出节奏修复重写请求，由 Claude Code 自身执行。
 
-    # Claude Code 模式：使用 MCP Codex
-    if _CLAUDE_CODE_MODE:
-        return _write_with_mcp_codex(project_root, chapter_path, prompt)
-    try:
-        from novel_chapter_writer import write_chapter  # type: ignore[import]
-        overrides: Dict[str, object] = {"writing_prompt": prompt}
-        if getattr(args, "llm_provider", None):
-            overrides["ai_provider"] = args.llm_provider
-        if getattr(args, "llm_model", None):
-            overrides["model"] = args.llm_model
-        if getattr(args, "llm_api_key", None):
-            provider = getattr(args, "llm_provider", "") or "openai"
-            if provider == "openai":
-                overrides["openai_api_key"] = args.llm_api_key
-            elif provider == "anthropic":
-                overrides["anthropic_api_key"] = args.llm_api_key
-            else:
-                overrides["api_key"] = args.llm_api_key
-        result = write_chapter(project_root, chapter_file=chapter_path, config_overrides=overrides, dry_run=False)
-        return bool(result.get("ok"))
-    except Exception:
-        return False
+    Returns:
+        {"needs_writing": True, "task_type": "pacing_rewrite",
+         "prompt": str, "chapter_file": str}
+        如果无法处理返回空 dict。
+    """
+    return {
+        "needs_writing": True,
+        "task_type": "pacing_rewrite",
+        "prompt": prompt,
+        "chapter_file": str(chapter_path),
+    }
 
 
 def _calc_skip_density(text: str, paragraphs: List[str]) -> float:
@@ -356,10 +295,10 @@ def _decompose_beat_scenes(
     overrides: Dict[str, object],
     project_root: Path,
 ) -> Optional[Dict[str, object]]:
-    """Phase 1：调用 LLM 将 beat 拆解为 5~7 个微时刻 JSON。
+    """Phase 1：生成场景分解提示词，由 Claude Code 自身执行。
 
-    复用散文写作的 provider 配置，发出一次独立的场景分解请求。
-    成功返回 scene_map dict（含 moments 列表），失败返回 None（降级到原流程）。
+    返回写作任务 dict（含 prompt 和 output_file），供 continue_write 的
+    writing_tasks 列表使用。不再直接调用 LLM API。
     """
     import json as _json
 
@@ -373,52 +312,16 @@ def _decompose_beat_scenes(
         chars_per_moment=chars_per_moment,
     )
 
-    try:
-        from novel_chapter_writer import write_chapter  # type: ignore[import]
+    tmp_file = project_root / "00_memory" / "beats" / "_scene_decompose_tmp.json"
+    ensure_dir(tmp_file.parent)
 
-        tmp_file = project_root / "00_memory" / "beats" / "_scene_decompose_tmp.md"
-        decompose_overrides: Dict[str, object] = {
-            **overrides,  # type: ignore[misc]
-            "writing_prompt": user_msg,
-            "writing_system_prompt_override": _SCENE_DECOMPOSE_SYSTEM,
-            "max_tokens": 1200,
-            "humanizer_enabled": False,
-            # 场景分解是中间任务，禁止触发记忆更新，避免污染项目记忆
-            "auto_update_memory": False,
-        }
-
-        result = write_chapter(
-            project_root,
-            chapter_file=tmp_file,
-            config_overrides=decompose_overrides,
-            dry_run=False,
-        )
-
-        if not result.get("ok"):
-            return None
-
-        raw = tmp_file.read_text(encoding="utf-8") if tmp_file.exists() else ""
-        tmp_file.unlink(missing_ok=True)
-
-        # 优先提取 ```json...``` 代码块，其次尝试裸 JSON
-        json_match = re.search(r"```json\s*(.*?)\s*```", raw, re.DOTALL)
-        if json_match:
-            scene_map: Dict[str, object] = _json.loads(json_match.group(1))
-        else:
-            bare = re.search(r'\{[^{}]*"moments"[^{}]*\[.*?\]\s*\}', raw, re.DOTALL)
-            if not bare:
-                return None
-            scene_map = _json.loads(bare.group(0))
-
-        moments = scene_map.get("moments", [])
-        if not isinstance(moments, list) or len(moments) < 3:
-            return None
-
-        return scene_map
-
-    except Exception as _dbs_err:
-        print(f"[警告] 场景分解失败，降级到原始扩写提示词: {_dbs_err}")
-        return None
+    return {
+        "task_type": "scene_decompose",
+        "prompt": user_msg,
+        "system_prompt": _SCENE_DECOMPOSE_SYSTEM,
+        "output_file": str(tmp_file),
+        "description": "将此beat拆解为5-7个微时刻，输出JSON格式：{\"moments\":[{\"id\":1,\"action\":\"...\",\"sensory\":\"...\",\"emotion\":\"...\",\"obstacle\":\"...\"}]}",
+    }
 
 
 def _build_scene_anchored_prompt(expand_prompt: str, scene_map: Dict[str, object]) -> str:
@@ -1195,12 +1098,13 @@ def _generate_beat_draft(
     query: str,
     writing_constraints: Optional[Dict[str, object]],
     args: argparse.Namespace,
-) -> Tuple[bool, str]:
-    """Beat Sheet 流水线：generate → expand → synthesize。
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """Beat Sheet 流水线：generate → expand → collect writing tasks。
 
-    返回 (success: bool, mode: str)。
-    成功时 chapter_path 已被写入合成草稿。
-    失败时返回 (False, error_reason)，调用方应回退到普通 draft 模式。
+    纯 Skill 模式：不再调用 LLM API，改为收集写作任务列表，
+    由 Claude Code 自身执行写作。
+
+    返回 (success: bool, mode: str, writing_tasks: list)。
     """
     chapter_goal = query[:200]  # 截断保证参数合法
 
@@ -1248,8 +1152,8 @@ def _generate_beat_draft(
     pacing_profile = PACING_MODE_PROFILES[pacing_depth]
     max_skip_density = float(pacing_profile.get("max_skip_density", 0.30))
 
-    # Step 2: 逐 Beat 扩写 + Beat 级校验与重试
-    draft_provider = _resolve_draft_provider(args, project_root)
+    # Step 2: 逐 Beat 收集写作任务
+    beat_tasks: List[Dict[str, Any]] = []
 
     for beat_id in range(1, beat_count + 1):
         e_code, _e_out, _e_err, e_payload = run_python(
@@ -1270,138 +1174,32 @@ def _generate_beat_draft(
         beat_meta = next((b for b in beats_meta if b.get("beat_id") == beat_id), {})
         word_target = int(e_payload.get("word_target") or beat_meta.get("word_target") or 800)
 
-        if draft_provider == "llm" and expand_prompt:
-            try:
-                from novel_chapter_writer import write_chapter  # type: ignore[import]
-                overrides: Dict[str, object] = {}
-                if getattr(args, "llm_provider", None):
-                    overrides["ai_provider"] = args.llm_provider
-                if getattr(args, "llm_model", None):
-                    overrides["model"] = args.llm_model
-                if getattr(args, "llm_api_key", None):
-                    # 按 provider 使用正确的 key 名，避免静默退化到环境变量兜底
-                    _llm_prov = getattr(args, "llm_provider", "") or ""
-                    if _llm_prov == "openai":
-                        overrides["openai_api_key"] = args.llm_api_key
-                    elif _llm_prov == "anthropic":
-                        overrides["anthropic_api_key"] = args.llm_api_key
-                    else:
-                        overrides["api_key"] = args.llm_api_key
+        if expand_prompt:
+            # 纯 Skill 模式：收集 beat 写作任务，不调 API
+            # 场景分解任务
+            scene_task = _decompose_beat_scenes(
+                expand_prompt, word_target, {}, project_root
+            )
+            if scene_task:
+                beat_tasks.append(scene_task)
 
-                # ── Phase 1：场景分解（Two-Phase Writing）────────────────────
-                # 调用 LLM 将 beat 预先拆解为 5~7 个微时刻，强迫模型承诺
-                # 具体瞬间（action/sensory/emotion/obstacle），使后续写作
-                # 无法通过概括跳过来压缩内容。分解失败时降级到原流程。
-                scene_map = _decompose_beat_scenes(
-                    expand_prompt, word_target, overrides, project_root
-                )
-                # 用场景锚定提示词替换原始扩写提示词（Phase 2 基础提示词）
-                base_prompt = (
-                    _build_scene_anchored_prompt(expand_prompt, scene_map)
-                    if scene_map is not None
-                    else expand_prompt
-                )
-
-                # Beat 级校验与重试循环（最多 3 次尝试，失败降级接受继续下一 beat）
-                attempt_results: List[Dict[str, object]] = []
-                accepted = False
-                final_validation: Optional[Dict[str, object]] = None
-
-                for attempt in range(3):
-                    current_prompt = (
-                        base_prompt if attempt == 0
-                        else _build_retry_prompt(base_prompt, attempt, word_target)
-                    )
-                    overrides["writing_prompt"] = current_prompt
-
-                    try:
-                        llm_result = write_chapter(
-                            project_root,
-                            chapter_file=beat_file,
-                            config_overrides=overrides,
-                            dry_run=False,
-                        )
-                        llm_ok = bool(llm_result.get("ok"))
-                    except Exception as exc:
-                        attempt_results.append({
-                            "attempt": attempt + 1, "llm_ok": False,
-                            "error": repr(exc), "accepted": False,
-                        })
-                        continue
-
-                    if not llm_ok:
-                        attempt_results.append({
-                            "attempt": attempt + 1, "llm_ok": False,
-                            "error": str(llm_result.get("error", "llm_write_failed")),
-                            "accepted": False,
-                        })
-                        continue
-
-                    # LLM 写成功，立即校验 beat 正文质量
-                    beat_text = read_text(beat_file) if beat_file.exists() else ""
-                    final_validation = cast(
-                        Dict[str, object],
-                        _validate_beat_text(beat_text, word_target, max_skip_density),
-                    )
-                    attempt_results.append({
-                        "attempt": attempt + 1, "llm_ok": True,
-                        "accepted": bool(final_validation.get("passed")),
-                        "validation": final_validation,
-                    })
-
-                    if final_validation.get("passed"):
-                        accepted = True
-                        break
-                    # 未通过 → 继续下一次 attempt（最多到 attempt=2）
-
-                # 所有尝试用尽仍未通过：降级写入扩写提示词模板（保证合成不中断）
-                if not accepted and (not beat_file.exists() or not read_text(beat_file).strip()):
-                    write_text(beat_file, expand_prompt)
-
-                # 将 beat 级校验结果写回 beat sheet，供后续分析
-                if beat_meta:
-                    beat_meta["generation_meta"] = {  # type: ignore[assignment]
-                        "pacing_depth": pacing_depth,
-                        "word_target": word_target,
-                        "max_skip_density": max_skip_density,
-                        "accepted": accepted,
-                        "attempt_count": len(attempt_results),
-                        "retry_count": max(0, len(attempt_results) - 1),
-                        "attempts": attempt_results,
-                        "final_validation": final_validation,
-                    }
-                    save_json(sheet_path, sheet, indent=2)
-
-            except Exception as _beat_err:
-                print(f"[警告] Beat {beat_id} LLM 写作异常，降级写入扩写提示词模板: {_beat_err}")
-                write_text(beat_file, expand_prompt)
+            # Beat 扩写任务
+            system_prompt_for_beat = get_system_prompt(chapter_no) if 'get_system_prompt' in dir() else _NOVELIST_PERSONAS[(chapter_no - 1) % len(_NOVELIST_PERSONAS)] if '_NOVELIST_PERSONAS' in dir() else ""
+            beat_tasks.append({
+                "task_type": "beat_write",
+                "beat_id": beat_id,
+                "prompt": expand_prompt,
+                "system_prompt": system_prompt_for_beat,
+                "output_file": str(beat_file),
+                "word_target": word_target,
+                "description": f"按扩写提示词生成第{chapter_no}章 beat {beat_id} 正文",
+            })
         else:
             write_text(beat_file, expand_prompt)
 
-    # Step 3: chapter_synthesizer 合成
-    s_code, _s_out, _s_err, s_payload = run_python(
-        SCRIPT_DIR / "chapter_synthesizer.py",
-        ["synthesize",
-         "--project-root", str(project_root),
-         "--chapter", str(chapter_no)],
-    )
-    if s_code != 0 or not isinstance(s_payload, dict) or not s_payload.get("ok"):
-        return False, "synthesize_failed"
-
-    output_file = s_payload.get("output_file", "")
-    mode = s_payload.get("mode", "unknown")
-
-    if mode == "draft_merged" and output_file and Path(output_file).exists():
-        synth_text = read_text(Path(output_file))
-        write_text(chapter_path, synth_text)
-        return True, "beat_sheet_llm"
-    elif mode == "prompt_only" and output_file and Path(output_file).exists():
-        synth_prompt = read_text(Path(output_file))
-        stub = f"# {chapter_path.stem}\n\n{BEAT_SHEET_STUB_MARKER}\n\n{synth_prompt}\n"
-        write_text(chapter_path, stub)
-        return True, "beat_sheet_template"
-
-    return False, "synthesize_no_output"
+    # Step 3: 在纯 Skill 模式下，不自动合成（beat 正文由 CC 写入后，finalize 阶段合成）
+    # 只返回收集到的写作任务
+    return True, "beat_sheet_skill", beat_tasks
 
 
 def _next_fix_block_index(text: str, prefix: str) -> int:
@@ -1442,10 +1240,10 @@ def apply_targeted_quality_fix(
         for f in failures
     ):
         prompt = _build_pacing_rewrite_prompt(query, failures)
-        if _rewrite_chapter_with_llm(project_root, chapter_path, args, prompt):
-            txt = read_text(chapter_path).rstrip()
-            txt = _normalize_paragraph_variance(_rebalance_dialogue_heavy_text(txt, query))
-            actions.append("LLM rewrite for high skip density")
+        rewrite_task = _rewrite_chapter_with_llm(project_root, chapter_path, args, prompt)
+        if rewrite_task.get("needs_writing"):
+            # 纯 Skill 模式：输出修复任务，CC 执行后重新 finalize
+            actions.append(f"需要CC执行节奏修复: {prompt[:80]}")
         else:
             txt = _normalize_paragraph_variance(_rebalance_dialogue_heavy_text(txt, query))
             txt += (
@@ -1591,7 +1389,7 @@ def write_gate_artifacts(
         ["report", "--chapter-file", str(chapter_path)],
     )
     if h_code == 0 and isinstance(h_payload, dict) and h_payload.get("ok"):
-        llm_provider = os.environ.get("NOVEL_LLM_PROVIDER", "")
+        # 纯 Skill 模式：不自动调 LLM 修复，只收集提示词供 CC 执行 /校稿
         while (
             _SEVERITY_ORDER.get(h_payload.get("severity", "low"), 0) >= 1
             and humanizer_rounds < 2
@@ -1605,24 +1403,9 @@ def write_gate_artifacts(
             humanize_prompt = p_payload.get("prompt", "")
             if not humanize_prompt:
                 break
-            if llm_provider:
-                try:
-                    from novel_chapter_writer import write_chapter  # type: ignore[import]
-                    llm_result = write_chapter(
-                        project_root,
-                        chapter_file=chapter_path,
-                        config_overrides={
-                            "ai_provider": llm_provider,
-                            "writing_prompt": humanize_prompt,
-                        },
-                        dry_run=False,
-                    )
-                    if llm_result.get("ok"):
-                        humanizer_auto_fixed = True
-                except Exception as _hum_err:
-                    print(f"[警告] Humanizer 自动修复失败: {_hum_err}")
+            # 记录润色提示词但不自动执行，由 CC 在 /校稿 步骤执行
             humanizer_rounds += 1
-            # 重新检测，severity 已达 low 则退出循环
+            # 重新检测
             re_code, _, _, re_payload = run_python(
                 SCRIPT_DIR / "text_humanizer.py",
                 ["report", "--chapter-file", str(chapter_path)],
@@ -1631,8 +1414,8 @@ def write_gate_artifacts(
                     and _SEVERITY_ORDER.get(re_payload.get("severity", "low"), 0) < 1):
                 h_payload = re_payload
                 break
-            if not llm_provider:
-                break  # 非 LLM 模式只生成一次 prompt，不继续循环
+            # 纯 Skill 模式下只生成一次 prompt，不继续循环
+            break
         severity_map = {"low": "轻微", "medium": "中等", "high": "严重"}
         sev = severity_map.get(h_payload.get("severity", ""), h_payload.get("severity", ""))
         report_md = h_payload.get("report", "")
@@ -1995,99 +1778,96 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
         writing_query = "\n\n".join(query_sections)
 
         auto_draft_applied = False
-        draft_provider_used = _resolve_draft_provider(args, project_root)
+        draft_provider_used = "skill"  # 纯 Skill 模式，无 API
         fallback_applied = False
         llm_error_msg = None
+        writing_tasks: List[Dict[str, Any]] = []  # 收集写作任务，由 CC 执行
 
-        # Beat Sheet 流水线（优先于普通 draft，默认开启）
-        if getattr(args, "use_beat_sheet", True) and chapter_is_draft_stub(chapter_path):
-            _beat_chapter_no = chapter_no_from_name(chapter_path.name)
-            if _beat_chapter_no > 0:
-                beat_applied, beat_mode = _generate_beat_draft(
-                    project_root, chapter_path, _beat_chapter_no,
-                    writing_query, writing_constraints, args,
-                )
-                if beat_applied:
-                    auto_draft_applied = True
-                    draft_provider_used = beat_mode
+        # 判断执行阶段
+        phase = getattr(args, "phase", "prepare")
 
-        if chapter_is_draft_stub(chapter_path) and args.auto_draft:
-            if draft_provider_used == "llm":
-                # 尝试使用 LLM 写作
-                try:
-                    from novel_chapter_writer import write_chapter
-                    config_overrides = {}
-                    if args.llm_provider:
-                        config_overrides['ai_provider'] = args.llm_provider
-                    if args.llm_model:
-                        config_overrides['model'] = args.llm_model
-                    if args.llm_api_key:
-                        provider = args.llm_provider or 'openai'
-                        if provider == 'openai':
-                            config_overrides['openai_api_key'] = args.llm_api_key
-                        elif provider == 'anthropic':
-                            config_overrides['anthropic_api_key'] = args.llm_api_key
-                        else:
-                            config_overrides['api_key'] = args.llm_api_key
-
-                    llm_result = write_chapter(
-                        project_root,
-                        chapter_file=chapter_path,
-                        config_overrides=config_overrides,
-                        dry_run=False,
-                        context_window=5,
-                    )
-
-                    if llm_result.get("ok"):
-                        draft_provider_used = "llm"
-                        auto_draft_applied = True
-                    else:
-                        # LLM 调用失败，回退到模板
-                        llm_error_msg = llm_result.get("error", "unknown error")
-                        draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
-                        write_text(chapter_path, draft)
-                        draft_provider_used = "template"
-                        fallback_applied = True
-                        auto_draft_applied = True
-
-                except Exception as e:
-                    # 导入或调用异常，回退到模板
-                    llm_error_msg = str(e)
-                    draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
-                    write_text(chapter_path, draft)
-                    draft_provider_used = "template"
-                    fallback_applied = True
-                    auto_draft_applied = True
-            elif draft_provider_used == "beat_sheet_template":
-                # beat_sheet_template 模式：beat 合成已产出结构化写作指引（BEAT_SHEET_STUB），
-                # 用 beat sheet JSON 中的 chapter_goal 和各 beat 摘要构造富语义 query，
-                # 生成比纯泛型模板更贴合剧情的草稿，保留 beat 结构信息。
-                beat_sheet_json = load_json(
-                    project_root / "00_memory" / "beats"
-                    / f"ch{chapter_no_from_name(chapter_path.name):04d}_beat_sheet.json",
-                    default={},
-                )
-                beat_goal = beat_sheet_json.get("chapter_goal", "") or query
-                beat_summaries = [
-                    str(b.get("summary", ""))
-                    for b in beat_sheet_json.get("beats", [])
-                    if isinstance(b, dict) and b.get("summary") and "[待填充]" not in str(b.get("summary", ""))
-                ]
-                enriched_beat_query = beat_goal
-                if beat_summaries:
-                    enriched_beat_query += "；" + "、".join(beat_summaries[:4])
-                draft = generate_draft_text(
-                    project_root, chapter_path,
-                    enriched_beat_query[:300],
-                    min_chars=args.min_chars,
-                )
-                write_text(chapter_path, draft)
+        # ── finalize 阶段：跳过写作准备，直接进入门禁收尾 ──
+        if phase == "finalize":
+            # 检测章节是否已有正文
+            if chapter_path and chapter_path.exists() and not chapter_is_draft_stub(chapter_path):
+                draft_mode = False
                 auto_draft_applied = True
             else:
-                # 纯 template 模式
-                draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
-                write_text(chapter_path, draft)
-                auto_draft_applied = True
+                draft_mode = True
+                auto_draft_applied = False
+
+        # ── prepare 阶段：收集写作任务 ──
+        if phase == "prepare":
+            # Beat Sheet 流水线（优先于普通 draft，默认开启）
+            if getattr(args, "use_beat_sheet", True) and chapter_is_draft_stub(chapter_path):
+                _beat_chapter_no = chapter_no_from_name(chapter_path.name)
+                if _beat_chapter_no > 0:
+                    beat_applied, beat_mode, beat_writing_tasks = _generate_beat_draft(
+                        project_root, chapter_path, _beat_chapter_no,
+                        writing_query, writing_constraints, args,
+                    )
+                    if beat_applied:
+                        auto_draft_applied = True
+                        draft_provider_used = beat_mode
+                        writing_tasks.extend(beat_writing_tasks)
+
+            if chapter_is_draft_stub(chapter_path) and args.auto_draft and not auto_draft_applied:
+                # 无 Beat Sheet 时，生成章节写作任务
+                from novel_chapter_writer import write_chapter
+                llm_result = write_chapter(
+                    project_root,
+                    chapter_file=chapter_path,
+                    context_window=5,
+                )
+                if llm_result.get("ok") and llm_result.get("needs_writing"):
+                    writing_tasks.append({
+                        "task_type": "chapter_write",
+                        "prompt": llm_result["prompt"],
+                        "system_prompt": llm_result["system_prompt"],
+                        "chapter_file": str(chapter_path),
+                        "chapter_no": llm_result.get("chapter_no", 0),
+                        "entry_mode": llm_result.get("entry_mode", ""),
+                        "description": "按提示词生成完整章节正文",
+                    })
+                    auto_draft_applied = True
+
+            # prepare 阶段输出写作请求后返回，不执行门禁
+            runtime_ms = round((time.time() - started_at) * 1000, 2)
+            # prepare 阶段也保存幂等缓存
+            if args.idempotent_cache:
+                flow_dir = project_root / FLOW_DIR_NAME
+                ensure_dir(flow_dir)
+                cache = load_continue_cache(flow_dir)
+                entries_raw = cache.get("entries")
+                if not isinstance(entries_raw, dict):
+                    entries_raw = {}
+                    cache["entries"] = entries_raw
+                entries_raw[request_id] = {
+                    "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "chapter_hash_before": chapter_hash_before,
+                    "result": {
+                        "ok": True,
+                        "phase": "prepare",
+                        "needs_writing": bool(writing_tasks),
+                        "chapter_file": str(chapter_path) if chapter_path else "",
+                    },
+                }
+                save_continue_cache(flow_dir, cache)
+
+            return {
+                "ok": True,
+                "phase": "prepare",
+                "needs_writing": bool(writing_tasks),
+                "command": "continue-write",
+                "project_root": str(project_root),
+                "chapter_file": str(chapter_path) if chapter_path else "",
+                "writing_tasks": writing_tasks,
+                "writing_constraints": writing_constraints,
+                "pacing_mode": pacing_mode,
+                "query_result": q_payload if q_payload is not None else {"stdout": q_out, "stderr": q_err},
+                "run_id": run_id,
+                "runtime_ms": runtime_ms,
+            }
 
         draft_mode = chapter_is_draft_stub(chapter_path)
 
@@ -2264,7 +2044,9 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                                     or ""
                                 )
 
-        ok = (q_code == 0 and b_code == 0 and (draft_mode or gate_passed_final))
+        # finalize 阶段：ok=True 表示阶段执行成功（q_code==0 且 b_code==0）
+        # 门禁是否通过由 gate_passed_final 字段单独表示
+        ok = (q_code == 0 and b_code == 0)
 
         if (not ok) and args.rollback_on_failure and snapshot_path and original_chapter_path and chapter_path:
             restored = restore_snapshot(snapshot_path, original_chapter_path, chapter_path)
@@ -2284,6 +2066,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
         runtime_ms = round((time.time() - started_at) * 1000, 2)
         result: Dict[str, object] = {
             "ok": ok,
+            "phase": phase,
             "command": "continue-write",
             "project_root": str(project_root),
             "chapter_file": str(chapter_path) if chapter_path else "",
@@ -2777,14 +2560,8 @@ def parse_args() -> argparse.Namespace:
                         help="AI高频词密度限制，默认0.05（5%%）")
     p_cont.add_argument("--auto-research", dest="auto_research", action="store_true", default=True,
                         help="写前自动检测知识缺口并提示调研")
-    p_cont.add_argument("--draft-provider", choices=["auto", "template", "llm"], default="auto",
-                        help="Draft strategy: auto (Two-Phase if LLM configured), template, or llm")
-    p_cont.add_argument("--llm-provider", default=None,
-                        help="LLM提供商(openai/anthropic/kimi/glm/minimax)，需配合--draft-provider llm")
-    p_cont.add_argument("--llm-model", default=None,
-                        help="LLM模型名称，需配合--draft-provider llm")
-    p_cont.add_argument("--llm-api-key", default=None,
-                        help="LLM API密钥，需配合--draft-provider llm")
+    p_cont.add_argument("--phase", choices=["prepare", "finalize"], default="prepare",
+                        help="执行阶段：prepare(收集写作任务) 或 finalize(门禁收尾)")
     p_cont.add_argument("--enable-constraints", dest="enable_constraints",
                         action="store_true", default=True,
                         help="写前注入大纲配额、反向刹车与事件推荐约束（默认开启）")

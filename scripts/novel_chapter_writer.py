@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Novel Chapter Writer - 自动化小说章节生成器
+Novel Chapter Writer - 小说章节提示词生成器（纯 Claude Code Skill 模式）
 
 功能：
 1. 自动提取项目上下文（上一章、角色状态、情节线等）
-2. 生成结构化的AI提示词
-3. 调用外部AI API生成内容
-4. 自动写入章节文件并更新记忆
+2. 生成结构化的写作提示词（system_prompt + user_prompt）
+3. 输出 JSON 格式的写作请求，由 Claude Code 自身执行写作
 
-作者：AI Assistant
-版本：1.0.0
+本脚本是纯 Skill 模式，不调用任何外部 API。
+所有 AI 生成环节由 Claude Code 自身完成。
+
+版本：2.0.0
 """
 
 import argparse
@@ -40,24 +41,8 @@ try:
 except ImportError:
     HAS_YAML = False
 
-try:
-    import openai
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
-
-try:
-    import anthropic
-    HAS_ANTHROPIC = True
-except ImportError:
-    HAS_ANTHROPIC = False
-
-# 默认配置
+# 默认配置（纯 Skill 模式，不含任何 API 配置）
 DEFAULT_CONFIG = {
-    "ai_provider": "openai",  # openai, anthropic, local, kimi, glm, minimax
-    "model": "gpt-4",
-    "temperature": 0.8,
-    "max_tokens": 4000,
     "min_chapter_chars": 3000,
     "target_chapter_chars": 3500,
     "context_window": 5,  # 加载前5章作为上下文
@@ -117,17 +102,16 @@ class ProjectContext:
 
 class ConfigManager:
     """配置管理器"""
-    
+
     def __init__(self, project_root: Path):
         self.project_root = project_root
         self.config_file = project_root / ".novel_writer_config.yaml"
         self.config = self.load_config()
-    
+
     def load_config(self) -> Dict[str, Any]:
-        """加载配置，优先级：配置文件 > 环境变量 > 默认配置"""
+        """加载配置，优先级：配置文件 > 默认配置"""
         config = DEFAULT_CONFIG.copy()
-        
-        # 从文件加载
+
         if self.config_file.exists():
             try:
                 if HAS_YAML:
@@ -136,29 +120,14 @@ class ConfigManager:
                         if file_config:
                             config.update(file_config)
                 else:
-                    # 使用JSON作为备选
-                    import json
                     with open(self.config_file, 'r', encoding='utf-8') as f:
                         file_config = json.load(f)
                         config.update(file_config)
             except Exception as e:
                 print(f"[警告] 加载配置文件失败: {e}")
-        
-        # 从环境变量加载
-        env_mappings = {
-            'NOVEL_AI_PROVIDER': 'ai_provider',
-            'NOVEL_AI_MODEL': 'model',
-            'OPENAI_API_KEY': 'openai_api_key',
-            'ANTHROPIC_API_KEY': 'anthropic_api_key',
-        }
-        
-        for env_var, config_key in env_mappings.items():
-            value = os.getenv(env_var)
-            if value:
-                config[config_key] = value
-        
+
         return config
-    
+
     def save_config(self):
         """保存配置到文件"""
         try:
@@ -175,67 +144,60 @@ class ConfigManager:
 
 class ContextExtractor:
     """上下文提取器"""
-    
+
     def __init__(self, project_root: Path):
         self.project_root = project_root
         self.memory_dir = project_root / "00_memory"
         self.manuscript_dir = project_root / "03_manuscript"
         self.kb_dir = project_root / "02_knowledge_base"
-    
+
     def extract_chapter_number(self, chapter_file: Path) -> int:
         """从章节文件名提取章节号，返回0表示未知"""
         match = re.search(r'第(\d+)章', chapter_file.name)
         if match:
             return int(match.group(1))
-        return 0  # 返回0表示未知，让调用者处理
-    
+        return 0
+
     def extract_chapter_goal(self, chapter_file: Path) -> str:
         """从占位章节提取目标"""
         if not chapter_file.exists():
             return "推进剧情发展"
-        
+
         content = chapter_file.read_text(encoding='utf-8', errors='ignore')
-        
-        # 尝试提取本章目标
+
         goal_match = re.search(r'##?\s*本章目标\s*\n+([\s\S]+?)(?=##|\Z)', content)
         if goal_match:
             return goal_match.group(1).strip()
-        
-        # 尝试提取场景草图中的目标
+
         scene_match = re.search(r'-\s*章末钩子：(.+)', content)
         if scene_match:
             return f"完成章节目标，引出：{scene_match.group(1).strip()}"
-        
+
         return "推进剧情发展"
-    
+
     def get_previous_chapters(self, current_chapter_no: int, context_window: int = 5) -> List[Dict[str, Any]]:
         """获取前几章作为上下文"""
         chapters = []
-        
+
         for i in range(max(1, current_chapter_no - context_window), current_chapter_no):
-            # 查找章节文件
             chapter_files = list(self.manuscript_dir.glob(f"第{i}章*.md"))
             if not chapter_files:
                 continue
-            
+
             chapter_file = chapter_files[0]
             content = chapter_file.read_text(encoding='utf-8', errors='ignore')
-            
-            # 提取正文部分（移除Markdown标题和注释）
+
             lines = content.split('\n')
             body_lines = []
             for line in lines:
-                # 跳过标题行和注释
                 if line.startswith('#') or line.startswith('<!--'):
                     continue
                 body_lines.append(line)
-            
+
             body = '\n'.join(body_lines).strip()
-            
-            # 提取最后500字作为摘要
+
             body_clean = re.sub(r'\s+', '', body)
             if len(body_clean) > 500:
-                # 找到大约最后500字的位置
                 char_count = 0
                 pos = len(body)
                 for i in range(len(body) - 1, -1, -1):
@@ -247,34 +209,32 @@ class ContextExtractor:
                 summary = body[pos:]
             else:
                 summary = body
-            
+
             chapters.append({
                 'chapter_no': i,
                 'file': str(chapter_file),
-                'summary': summary[:1000],  # 限制长度
+                'summary': summary[:1000],
             })
-        
+
         return chapters
-    
+
     def get_character_tracker(self) -> Dict[str, Any]:
         """获取角色追踪信息"""
         tracker_file = self.memory_dir / "character_tracker.md"
         if not tracker_file.exists():
             return {}
-        
+
         content = tracker_file.read_text(encoding='utf-8', errors='ignore')
-        
-        # 解析角色信息
+
         characters = {}
         current_character = None
-        
+
         lines = content.split('\n')
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
-            # 检查是否是角色名（表格格式）
+
             if line.startswith('|') and not line.startswith('|-'):
                 cells = [c.strip() for c in line.split('|')[1:-1]]
                 if cells and cells[0] and cells[0] not in ['人物', '角色', '姓名']:
@@ -283,47 +243,43 @@ class ContextExtractor:
                         'name': cells[0],
                         'info': cells[1:] if len(cells) > 1 else [],
                     }
-        
+
         return characters
-    
+
     def get_novel_plan(self) -> Dict[str, Any]:
         """获取小说规划信息"""
         plan_file = self.memory_dir / "novel_plan.md"
         if not plan_file.exists():
             return {}
-        
+
         content = plan_file.read_text(encoding='utf-8', errors='ignore')
-        
-        # 提取卷/幕结构
+
         volumes = []
         current_volume = None
-        current_arc = None
-        
+
         lines = content.split('\n')
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
-            # 检测卷标题
+
             if line.startswith('#') and ('卷' in line or '起' in line or '承' in line):
                 current_volume = {
                     'title': line.lstrip('#').strip(),
                     'arcs': [],
                 }
                 volumes.append(current_volume)
-            
-            # 检测幕/情节线
+
             elif line.startswith('##') or line.startswith('- ') or line.startswith('* '):
                 if current_volume:
                     arc_title = line.lstrip('-*#').strip()
                     current_volume['arcs'].append(arc_title)
-        
+
         return {
             'volumes': volumes,
-            'raw_content': content[:2000],  # 保留原始内容的前2000字
+            'raw_content': content[:2000],
         }
-    
+
     def get_style_anchor(self) -> Dict[str, Any]:
         """获取风格锚点信息"""
         style_file = self.memory_dir / "style_anchor.md"
@@ -332,10 +288,8 @@ class ContextExtractor:
 
         content = style_file.read_text(encoding='utf-8', errors='ignore')
 
-        # 提取风格要素
         style_info = {}
 
-        # 解析叙事视角（兼容 "视角：" 和旧版 "叙述视角：" 两种格式）
         perspective_match = (
             re.search(r'(?<!叙述)视角[：:]\s*(.+)', content)
             or re.search(r'叙述视角[：:]\s*(.+)', content)
@@ -343,7 +297,6 @@ class ContextExtractor:
         if perspective_match:
             style_info['perspective'] = perspective_match.group(1).strip()
 
-        # 解析句式特点（兼容 "句式：" 和旧版 "平均句长" 格式）
         sentence_match = re.search(r'句式[：:]\s*(.+)', content)
         if sentence_match:
             style_info['sentence_pattern'] = sentence_match.group(1).strip()
@@ -352,15 +305,12 @@ class ContextExtractor:
             if avg_match:
                 style_info['sentence_pattern'] = f"平均句长约 {avg_match.group(1)} 字"
 
-        # 解析对话风格（兼容 "对话：" 格式）
         dialogue_match = re.search(r'对话[：:]\s*(.+)', content)
         if dialogue_match:
             style_info['dialogue_style'] = dialogue_match.group(1).strip()
 
-        # 保留原始内容（用于提取禁词）
         style_info['raw_content'] = content[:1500]
 
-        # 解析禁止句式
         forbidden_patterns = []
         section_match = re.search(r'## 禁止句式\s*\n(.*?)(?=##|$)', content, re.DOTALL)
         if section_match:
@@ -370,7 +320,6 @@ class ContextExtractor:
                 if line and not line.startswith('#') and not line.startswith('-'):
                     forbidden_patterns.append(line)
 
-        # 解析禁止词汇
         forbidden_words = []
         vocab_match = re.search(r'## 禁止词汇\s*\n(.*?)(?=##|$)', content, re.DOTALL)
         if vocab_match:
@@ -385,12 +334,12 @@ class ContextExtractor:
         style_info['forbidden_words'] = forbidden_words
 
         return style_info
-    
+
     def extract_context(self, chapter_file: Path, context_window: int = 5) -> ProjectContext:
         """提取完整的项目上下文"""
         chapter_no = self.extract_chapter_number(chapter_file)
         chapter_goal = self.extract_chapter_goal(chapter_file)
-        
+
         return ProjectContext(
             project_root=self.project_root,
             chapter_no=chapter_no,
@@ -431,7 +380,7 @@ class PromptGenerator:
         mode = self._ENTRY_MODES[mode_idx]
         builder = getattr(self, f"_build_{mode}")
         return builder()
-    
+
     # ------------------------------------------------------------------
     # 辅助数据提取方法
     # ------------------------------------------------------------------
@@ -488,26 +437,23 @@ class PromptGenerator:
             "对话必须体现各角色的不同性格，不允许对话同质化。"
         )
 
-        # 从 style_anchor 读取禁忌清单
         s = self.ctx.style_anchor
         if not s:
             return base
 
         forbidden_items = []
-        # 添加禁止句式
         if s.get("forbidden_patterns"):
             patterns = s["forbidden_patterns"]
             if patterns:
                 forbidden_items.append("## 禁止句式")
-                for pattern in patterns[:5]:  # 最多取5个，避免过长
+                for pattern in patterns[:5]:
                     forbidden_items.append(f"- 禁止使用：{pattern}")
 
-        # 添加禁止词汇
         if s.get("forbidden_words"):
             words = s["forbidden_words"]
             if words:
                 forbidden_items.append("## 禁止词汇")
-                for word in words[:8]:  # 最多取8个，避免过长
+                for word in words[:8]:
                     forbidden_items.append(f"- 禁止使用：{word}")
 
         if forbidden_items:
@@ -720,293 +666,40 @@ class PromptGenerator:
         return "\n\n".join(lines)
 
 
-class AIProvider:
-    """AI服务提供基类"""
-    
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-    
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        """生成内容，子类必须实现"""
-        raise NotImplementedError
-
-
-class OpenAIProvider(AIProvider):
-    """OpenAI API提供者"""
-    
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        if not HAS_OPENAI:
-            raise ImportError(
-                "OpenAI SDK 导入失败\n"
-                "请检查:\n"
-                "  1) 已安装 openai 包 (pip install openai)\n"
-                "  2) Python 环境正确\n"
-                "  3) 无版本冲突 (pip check)"
-            )
-        
-        api_key = config.get('openai_api_key') or os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            raise ValueError("需要提供OpenAI API Key")
-        
-        self.client = openai.OpenAI(api_key=api_key)
-        self.model = config.get('model', 'gpt-4')
-        self.temperature = config.get('temperature', 0.8)
-        self.max_tokens = config.get('max_tokens', 4000)
-    
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        """调用OpenAI API生成内容"""
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            raise RuntimeError(f"OpenAI API调用失败: {e}")
-
-
-class AnthropicProvider(AIProvider):
-    """Anthropic Claude API提供者"""
-    
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        if not HAS_ANTHROPIC:
-            raise ImportError(
-                "Anthropic SDK 导入失败\n"
-                "请检查:\n"
-                "  1) 已安装 anthropic 包 (pip install anthropic)\n"
-                "  2) Python 环境正确\n"
-                "  3) 无版本冲突 (pip check)"
-            )
-        
-        api_key = config.get('anthropic_api_key') or os.getenv('ANTHROPIC_API_KEY')
-        if not api_key:
-            raise ValueError("需要提供Anthropic API Key")
-        
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = config.get('model', 'claude-3-sonnet-20240229')
-        self.temperature = config.get('temperature', 0.8)
-        self.max_tokens = config.get('max_tokens', 4000)
-        # extended_thinking：开启后 Claude 在写作前内部规划场景结构，
-        # 显著减少概括跳过。注意：开启时会自动忽略 temperature 参数。
-        self.extended_thinking: bool = bool(config.get('extended_thinking', False))
-        self.thinking_budget: int = int(config.get('thinking_budget_tokens', 3000))
-
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        """调用 Claude API 生成内容。
-
-        当 extended_thinking=True 时启用深度推理模式：Claude 会在内部规划
-        场景结构、微时刻分布、情绪节奏后再输出散文，天然防止概括跳过。
-        Extended thinking 与 temperature 不兼容，启用时自动移除 temperature。
-        """
-        try:
-            if self.extended_thinking:
-                # extended thinking 不兼容 temperature，必须省略该参数
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    thinking={
-                        "type": "enabled",
-                        "budget_tokens": self.thinking_budget,
-                    },
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": user_prompt}],
-                )
-            else:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": user_prompt}],
-                )
-            # 只取 text 类型的块（thinking 块不包含在输出正文中）
-            text_blocks = [b.text for b in response.content if b.type == "text"]
-            return "\n".join(text_blocks)
-        except Exception as e:
-            raise RuntimeError(f"Anthropic API调用失败: {e}")
-
-
-class LocalProvider(AIProvider):
-    """本地模型提供者（通过Ollama或其他本地API）"""
-    
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        self.api_url = config.get('local_api_url', 'http://localhost:11434/api/generate')
-        self.model = config.get('model', 'llama2')
-    
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        """调用本地API生成内容"""
-        import urllib.request
-        import json
-        
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        
-        data = {
-            "model": self.model,
-            "prompt": full_prompt,
-            "stream": False,
-        }
-        
-        try:
-            req = urllib.request.Request(
-                self.api_url,
-                data=json.dumps(data).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}
-            )
-            
-            with urllib.request.urlopen(req, timeout=300) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result.get('response', '')
-                
-        except Exception as e:
-            raise RuntimeError(f"本地API调用失败: {e}")
-
-
-class OpenAICompatibleProvider(AIProvider):
-    """通用 OpenAI 兼容 API 提供者（Kimi/GLM/MiniMax 等）。
-
-    Kimi 2.5 (Moonshot)、GLM-5 (智谱)、MiniMax 2.5 均提供 OpenAI 兼容 API，
-    通过 base_url 切换即可。
-    """
-
-    PRESETS = {
-        "kimi": {
-            "base_url": "https://api.moonshot.cn/v1",
-            "default_model": "moonshot-v1-auto",
-            "env_key": "MOONSHOT_API_KEY",
-        },
-        "glm": {
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "default_model": "glm-4-plus",
-            "env_key": "GLM_API_KEY",
-        },
-        "minimax": {
-            "base_url": "https://api.minimax.chat/v1",
-            "default_model": "MiniMax-Text-01",
-            "env_key": "MINIMAX_API_KEY",
-        },
-    }
-
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
-        provider = config.get("ai_provider", "")
-        preset = self.PRESETS.get(provider, {})
-
-        base_url = config.get("base_url") or preset.get("base_url", "")
-        api_key = (
-            config.get(f"{provider}_api_key")
-            or os.getenv(preset.get("env_key", ""))
-            or config.get("api_key", "")
-        )
-        if not api_key:
-            raise ValueError(f"需要提供 {provider} API Key（环境变量 {preset.get('env_key', 'UNKNOWN')} 或 --api-key）")
-
-        self.base_url = base_url
-        self.api_key = api_key
-        self.model = config.get("model") or preset.get("default_model", "")
-        self.temperature = config.get("temperature", 0.8)
-        self.max_tokens = config.get("max_tokens", 4000)
-
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        """调用 OpenAI 兼容 API 生成内容。"""
-        import urllib.request
-        import json as _json
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
-        data = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-        try:
-            req = urllib.request.Request(
-                f"{self.base_url}/chat/completions",
-                data=_json.dumps(data).encode("utf-8"),
-                headers=headers,
-            )
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                result = _json.loads(resp.read().decode("utf-8"))
-                return result["choices"][0]["message"]["content"]
-        except Exception as e:
-            raise RuntimeError(f"{self.config.get('ai_provider', 'unknown')} API 调用失败: {e}")
-
-
-def create_ai_provider(config: Dict[str, Any]) -> AIProvider:
-    """工厂函数：根据配置创建对应的AI提供者"""
-    provider = config.get('ai_provider', 'openai')
-
-    if provider == 'openai':
-        return OpenAIProvider(config)
-    elif provider == 'anthropic':
-        return AnthropicProvider(config)
-    elif provider == 'local':
-        return LocalProvider(config)
-    elif provider in OpenAICompatibleProvider.PRESETS:
-        return OpenAICompatibleProvider(config)
-    elif config.get('base_url'):
-        # 自定义 OpenAI 兼容 API
-        return OpenAICompatibleProvider(config)
-    else:
-        raise ValueError(f"不支持的AI提供者: {provider}。支持: openai, anthropic, local, kimi, glm, minimax, 或指定 base_url")
-
-
 def count_chinese_chars(text: str) -> int:
     """统计中文字符数（不含标点和空格）"""
-    # 匹配中文字符
     chinese_chars = re.findall(r'[\u4e00-\u9fff]', text)
     return len(chinese_chars)
 
 
 def save_chapter_content(chapter_file: Path, content: str, config: Dict[str, Any]):
     """保存章节内容到文件"""
-    # 确保目录存在
     chapter_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    # 读取现有内容（如果有）
+
     existing_content = ""
     if chapter_file.exists():
         existing_content = chapter_file.read_text(encoding='utf-8', errors='ignore')
-    
-    # 提取标题（如果存在）
+
     title_match = re.search(r'^#\s+(.+)$', existing_content, re.MULTILINE)
     title = title_match.group(1) if title_match else chapter_file.stem.replace('-', ' ')
-    
-    # 构建新内容
+
     new_content = f"# {title}\n\n"
-    
-    # 保留原有的目标/草图部分（如果有）
+
     goal_match = re.search(r'##\s*本章目标[\s\S]*?(?=##|\Z)', existing_content)
     if goal_match:
         new_content += goal_match.group(0) + "\n\n"
-    
+
     scene_match = re.search(r'##\s*场景草图[\s\S]*?(?=##|\Z)', existing_content)
     if scene_match:
         new_content += scene_match.group(0) + "\n\n"
-    
-    # 添加生成的正文
+
     new_content += "## 正文\n\n"
     new_content += content.strip()
     new_content += "\n"
-    
-    # 写入文件
+
     chapter_file.write_text(new_content, encoding='utf-8')
     print(f"[信息] 章节内容已保存到: {chapter_file}")
-    
-    # 字数统计
+
     char_count = count_chinese_chars(content)
     print(f"[信息] 正文字数: {char_count}字")
 
@@ -1014,34 +707,28 @@ def save_chapter_content(chapter_file: Path, content: str, config: Dict[str, Any
 def update_memory_files(project_root: Path, chapter_no: int, content: str, context: ProjectContext):
     """更新记忆文件"""
     memory_dir = project_root / "00_memory"
-    
-    # 更新章节摘要
+
     try:
-        # 生成章节摘要（可以简化，取前500字）
         summary = content[:500] + "..." if len(content) > 500 else content
-        
-        # 保存到最近摘要
+
         recent_file = memory_dir / "chapter_summaries" / "recent.md"
         recent_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
         timestamp = time.strftime("%Y-%m-%d %H:%M")
         entry = f"\n## 第{chapter_no}章 - {timestamp}\n\n{summary}\n\n---\n"
-        
-        # 追加到文件
+
         with open(recent_file, 'a', encoding='utf-8') as f:
             f.write(entry)
-        
+
         print(f"[信息] 已更新章节摘要: {recent_file}")
-        
+
     except Exception as e:
         print(f"[警告] 更新章节摘要失败: {e}")
-    
-    # 更新novel_state
+
     try:
         state_file = memory_dir / "novel_state.md"
         if state_file.exists():
             content_old = state_file.read_text(encoding='utf-8', errors='ignore')
-            # 更新当前章节进度
             content_new = re.sub(
                 r'当前章节[：:]\s*\d+',
                 f'当前章节：第{chapter_no}章',
@@ -1053,45 +740,37 @@ def update_memory_files(project_root: Path, chapter_no: int, content: str, conte
         print(f"[警告] 更新小说状态失败: {e}")
 
 
-def _run_humanizer_pass(
-    provider: "AIProvider",
-    text: str,
-    detection: Dict[str, Any],
-    system_prompt: str,
-) -> str:
-    """基于检测结果生成二次润色 prompt，调用 AI 执行，返回润色后文本。
+def generate_humanizer_prompt(text: str, detection: Dict[str, Any]) -> Optional[str]:
+    """基于 humanizer 检测结果生成润色提示词（供 Claude Code 执行）。
 
-    只针对检测到的具体问题生成精准修改指令，不做大规模重写。
+    不调用任何 API，只返回提示词文本。
+    如果无需润色，返回 None。
     """
     hits: List[str] = []
 
-    # 收集高频 AI 词汇命中
     for item in detection.get("vocab_hits", [])[:8]:
         phrase = item.get("phrase", "")
         count = item.get("count", 0)
         if phrase and count:
             hits.append(f"「{phrase}」出现 {count} 次，需替换或删除")
 
-    # 弱化副词密度
     adverb_density = detection.get("weak_adverb_density", 0)
     if adverb_density > 3:
         hits.append(f"弱化副词（微微/淡淡/缓缓等）密度 {adverb_density:.1f}/千字，需削减")
 
-    # 段落首句总结模式
     summary_hits = detection.get("para_summary_hits", [])
     if summary_hits:
         hits.append(f"段落首句总结套话：{', '.join(summary_hits[:3])}，需改为具体描写")
 
-    # 对话同质化
     if detection.get("dialogue_monotone"):
         hits.append("对话标签单一/对话风格同质化，需让各角色说话有明显差异")
 
     if not hits:
-        return text  # 无具体问题，不润色
+        return None
 
     hit_summary = "\n".join(f"- {h}" for h in hits)
 
-    humanizer_prompt = (
+    return (
         "以下是一段小说正文，需要针对以下具体问题进行最小化修改：\n\n"
         f"{hit_summary}\n\n"
         "修改规则：\n"
@@ -1103,36 +782,27 @@ def _run_humanizer_pass(
         f"原文：\n{text}"
     )
 
-    humanizer_system = (
-        "你是专业文字编辑。接收小说正文和修改清单，"
-        "执行最小化精准修改后输出完整正文。"
-        "不输出任何说明、注释或修改记录，只输出修改后的小说正文。"
-    )
-
-    try:
-        return provider.generate(humanizer_system, humanizer_prompt)
-    except Exception:
-        return text  # 润色失败，返回原文
-
 
 def write_chapter(
     project_root: Path,
     chapter_file: Optional[Path] = None,
     config_overrides: Optional[Dict[str, Any]] = None,
-    dry_run: bool = False,
     context_window: int = 5,
 ) -> Dict[str, Any]:
-    """自动写作入口，可被外部脚本（如 auto_novel_writer.py）调用。
+    """生成写作提示词，由 Claude Code 自身执行写作。
+
+    本函数不再调用任何外部 API，只返回结构化的写作请求。
 
     Args:
         project_root: 项目根目录
         chapter_file: 章节文件路径（None 则自动检测）
         config_overrides: 配置覆盖
-        dry_run: 只生成提示词不调用 AI
         context_window: 上下文窗口大小
 
     Returns:
-        {"ok": bool, "chapter_file": str, "chars": int, "prompt": str (if dry_run), ...}
+        {"ok": True, "needs_writing": True, "chapter_file": str,
+         "prompt": str, "system_prompt": str, "chapter_no": int,
+         "entry_mode": str}
     """
     config_manager = ConfigManager(project_root)
     config = config_manager.config
@@ -1178,303 +848,104 @@ def write_chapter(
     full_prompt = prompt_generator.generate_prompt()
     system_prompt = get_system_prompt(context.chapter_no)
 
-    # 允许外部（如 novel_flow_executor）通过 config_overrides 完全覆盖提示词。
-    # writing_prompt 优先级高于 PromptGenerator 生成的模板提示词；
-    # writing_system_prompt_override 可替换小说家人格 system prompt（用于场景分解等任务）。
+    # 允许外部（如 novel_flow_executor）通过 config_overrides 完全覆盖提示词
     if config.get("writing_prompt"):
         full_prompt = str(config["writing_prompt"])
     if config.get("writing_system_prompt_override"):
         system_prompt = str(config["writing_system_prompt_override"])
 
-    if dry_run:
-        return {
-            "ok": True,
-            "chapter_file": str(chapter_file),
-            "prompt": full_prompt,
-            "system_prompt": system_prompt,
-            "entry_mode": PromptGenerator._ENTRY_MODES[
-                (context.chapter_no - 1) % len(PromptGenerator._ENTRY_MODES)
-            ],
-            "chapter_no": context.chapter_no,
-        }
+    entry_mode = PromptGenerator._ENTRY_MODES[
+        (context.chapter_no - 1) % len(PromptGenerator._ENTRY_MODES)
+    ]
 
-    # 调用 AI 生成
-    try:
-        provider = create_ai_provider(config)
-        generated_content = provider.generate(system_prompt, full_prompt)
+    result: Dict[str, Any] = {
+        "ok": True,
+        "needs_writing": True,
+        "chapter_file": str(chapter_file),
+        "prompt": full_prompt,
+        "system_prompt": system_prompt,
+        "chapter_no": context.chapter_no,
+        "entry_mode": entry_mode,
+    }
 
-        if not generated_content or len(generated_content) < 100:
-            return {"ok": False, "error": "生成内容太短或为空"}
+    # 如果 humanizer 可用，附带 AI 痕迹检测信息（供 CC 参考）
+    if _HUMANIZER_AVAILABLE and config.get("humanizer_enabled", True) and not config.get("skip_humanizer", False):
+        try:
+            # 检测现有章节内容的 AI 痕迹（如有正文的话）
+            existing_text = ""
+            if chapter_file.exists():
+                existing_text = chapter_file.read_text(encoding='utf-8', errors='ignore')
+                # 去掉标题和标记
+                existing_text = re.sub(r'^#.*$', '', existing_text, flags=re.MULTILINE)
+                existing_text = re.sub(r'<!--.*?-->', '', existing_text, flags=re.DOTALL)
+                existing_text = existing_text.strip()
+            if existing_text and len(existing_text) > 200:
+                detection = _humanizer_detect(existing_text)
+                ai_score = float(detection.get("ai_score", 0))
+                result["ai_detection"] = {
+                    "ai_score": ai_score,
+                    "vocab_hits": detection.get("vocab_hits", [])[:5],
+                    "weak_adverb_density": detection.get("weak_adverb_density", 0),
+                }
+                humanizer_prompt = generate_humanizer_prompt(existing_text, detection)
+                if humanizer_prompt:
+                    result["humanizer_prompt"] = humanizer_prompt
+        except Exception:
+            pass
 
-        # --- Humanizer 自动后处理 ---
-        ai_score_before = 0.0
-        ai_score_after = 0.0
-        humanizer_applied = False
-        if _HUMANIZER_AVAILABLE and config.get("humanizer_enabled", True) and not config.get("skip_humanizer", False):
-            try:
-                detection = _humanizer_detect(generated_content)
-                ai_score_before = float(detection.get("ai_score", 0))
-                if ai_score_before > 25:
-                    print(
-                        f"[人性化] AI痕迹分数 {ai_score_before:.1f}，"
-                        "启动自动二次润色..."
-                    )
-                    humanized = _run_humanizer_pass(
-                        provider, generated_content, detection, system_prompt
-                    )
-                    if humanized and len(humanized) > len(generated_content) * 0.6:
-                        detection2 = _humanizer_detect(humanized)
-                        ai_score_after = float(detection2.get("ai_score", 0))
-                        # 只有润色后分数确实下降才采用
-                        if ai_score_after < ai_score_before:
-                            generated_content = humanized
-                            humanizer_applied = True
-                            print(
-                                f"[人性化] 润色完成：{ai_score_before:.1f} → "
-                                f"{ai_score_after:.1f}"
-                            )
-                        else:
-                            print(
-                                f"[人性化] 润色后分数未改善"
-                                f"({ai_score_after:.1f})，保留原文。"
-                            )
-            except Exception as _he:
-                print(f"[人性化] 跳过（{_he}）")
-
-        chinese_chars = count_chinese_chars(generated_content)
-        save_chapter_content(chapter_file, generated_content, config)
-
-        if config.get("auto_update_memory", True):
-            update_memory_files(
-                project_root, context.chapter_no, generated_content, context
-            )
-
-        result: Dict[str, Any] = {
-            "ok": True,
-            "chapter_file": str(chapter_file),
-            "chars": chinese_chars,
-            "chapter_no": context.chapter_no,
-            "provider": config.get("ai_provider"),
-            "model": config.get("model"),
-            "entry_mode": PromptGenerator._ENTRY_MODES[
-                (context.chapter_no - 1) % len(PromptGenerator._ENTRY_MODES)
-            ],
-        }
-        if _HUMANIZER_AVAILABLE:
-            result["ai_score_before"] = ai_score_before
-            result["ai_score_after"] = ai_score_after if humanizer_applied else ai_score_before
-            result["humanizer_applied"] = humanizer_applied
-        return result
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    return result
 
 
 def main():
-    """主函数"""
+    """主函数 — 输出 JSON 格式的写作请求"""
     parser = argparse.ArgumentParser(
-        description="小说章节自动化生成器 - 提取上下文、生成提示词、调用AI",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例用法:
-  # 基础用法（自动生成提示词并调用AI）
-  python novel_chapter_writer.py --project-root ./my_novel
-
-  # 只生成提示词，不调用AI（用于手动复制到ChatGPT/Claude）
-  python novel_chapter_writer.py --project-root ./my_novel --dry-run
-
-  # 指定章节文件
-  python novel_chapter_writer.py --project-root ./my_novel --chapter-file ./my_novel/03_manuscript/第5章-待写.md
-
-  # 使用Claude API
-  python novel_chapter_writer.py --project-root ./my_novel --provider anthropic --api-key YOUR_KEY
-        """
+        description="小说章节提示词生成器（纯 Skill 模式）- 生成写作提示词，由 Claude Code 执行写作",
     )
-    
+
     # 必需参数
     parser.add_argument('--project-root', '-p', required=True,
                         help='项目根目录路径')
-    
+
     # 可选参数
     parser.add_argument('--chapter-file', '-c',
                         help='章节文件路径（自动检测最新章节）')
-    parser.add_argument('--dry-run', '-d', action='store_true',
-                        help='只生成提示词，不调用AI')
     parser.add_argument('--save-prompt', '-s',
                         help='保存生成的提示词到文件')
     parser.add_argument('--context-window', type=int, default=5,
                         help='加载前几章作为上下文（默认5）')
-    
-    # AI配置
-    parser.add_argument('--provider', choices=['openai', 'anthropic', 'local', 'kimi', 'glm', 'minimax'],
-                        help='AI提供商（覆盖配置）')
-    parser.add_argument('--model',
-                        help='模型名称（覆盖配置）')
-    parser.add_argument('--api-key',
-                        help='API密钥（覆盖配置和环境变量）')
-    parser.add_argument('--temperature', type=float,
-                        help='生成温度（覆盖配置）')
-    
+
     # 其他选项
     parser.add_argument('--no-update-memory', action='store_true',
                         help='不自动更新记忆文件')
-    parser.add_argument('--run-gate-check', action='store_true',
-                        help='生成后运行门禁检查')
     parser.add_argument('--config', '-f',
                         help='指定配置文件路径')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='显示详细信息')
-    
+
     args = parser.parse_args()
-    
+
     # 初始化
     project_root = Path(args.project_root).expanduser().resolve()
-    
+
     if not project_root.exists():
         print(f"[错误] 项目目录不存在: {project_root}")
         sys.exit(1)
-    
-    # 加载配置
-    config_manager = ConfigManager(project_root)
-    config = config_manager.config
-    
-    # 命令行参数覆盖配置
-    if args.provider:
-        config['ai_provider'] = args.provider
-    if args.model:
-        config['model'] = args.model
-    if args.api_key:
-        if config['ai_provider'] == 'openai':
-            config['openai_api_key'] = args.api_key
-        elif config['ai_provider'] == 'anthropic':
-            config['anthropic_api_key'] = args.api_key
-        else:
-            config['api_key'] = args.api_key
-    if args.temperature is not None:
-        config['temperature'] = args.temperature
-    if args.context_window:
-        config['context_window'] = args.context_window
-    
-    # 确定章节文件
-    manuscript_dir = project_root / "03_manuscript"
-    
-    if args.chapter_file:
-        chapter_file = Path(args.chapter_file).expanduser().resolve()
-    else:
-        # 自动检测最新的占位章节
-        if not manuscript_dir.exists():
-            print(f"[错误] 手稿目录不存在: {manuscript_dir}")
-            sys.exit(1)
-        
-        # 查找包含待写标记的章节
-        chapter_files = list(manuscript_dir.glob("第*章*.md"))
-        chapter_files.sort(key=lambda p: p.name)  # 按名称排序
-        
-        chapter_file = None
-        for cf in reversed(chapter_files):  # 从最新的开始找
-            content = cf.read_text(encoding='utf-8', errors='ignore')
-            if '[待写]' in content or '<!-- NOVEL_FLOW_STUB -->' in content:
-                chapter_file = cf
-                break
-        
-        if not chapter_file:
-            # 没有找到占位章节，使用最新的章节+1
-            if chapter_files:
-                latest = chapter_files[-1]
-                match = re.search(r'第(\d+)章', latest.name)
-                if match:
-                    next_no = int(match.group(1)) + 1
-                    chapter_file = manuscript_dir / f"第{next_no}章-待写.md"
-                else:
-                    chapter_file = manuscript_dir / "第1章-开篇.md"
-            else:
-                chapter_file = manuscript_dir / "第1章-开篇.md"
-    
-    print(f"[信息] 目标章节: {chapter_file}")
-    
-    # 提取上下文
-    print("[信息] 正在提取项目上下文...")
-    extractor = ContextExtractor(project_root)
-    context = extractor.extract_context(chapter_file, config.get('context_window', 5))
-    
-    if args.verbose:
-        print(f"[调试] 章节号: {context.chapter_no}")
-        print(f"[调试] 章节目标: {context.chapter_goal}")
-        print(f"[调试] 前几章数: {len(context.previous_chapters)}")
-        print(f"[调试] 角色数: {len(context.character_tracker)}")
-    
-    # 生成提示词
-    print("[信息] 正在生成AI提示词...")
-    prompt_generator = PromptGenerator(context)
-    full_prompt = prompt_generator.generate_prompt()
-    
+
+    # 生成写作请求
+    result = write_chapter(
+        project_root,
+        chapter_file=Path(args.chapter_file).expanduser().resolve() if args.chapter_file else None,
+        context_window=args.context_window,
+    )
+
     # 保存提示词（如果请求）
-    if args.save_prompt:
+    if args.save_prompt and result.get("ok"):
         prompt_file = Path(args.save_prompt)
-        prompt_file.write_text(full_prompt, encoding='utf-8')
+        prompt_file.write_text(result.get("prompt", ""), encoding='utf-8')
         print(f"[信息] 提示词已保存到: {prompt_file}")
-    
-    # 如果是dry-run，只输出提示词
-    if args.dry_run:
-        print("\n" + "="*60)
-        print("生成的AI提示词（预览）:")
-        print("="*60)
-        print(full_prompt[:2000])  # 只显示前2000字符
-        print("...")
-        print("="*60)
-        print("\n[信息] Dry-run模式，未调用AI。使用 --save-prompt 保存完整提示词。")
-        return
-    
-    # 创建AI提供者并生成内容
-    print(f"[信息] 正在调用AI生成内容（Provider: {config['ai_provider']}, Model: {config['model']}）...")
-    print("[信息] 这可能需要一些时间，请耐心等待...")
-    
-    try:
-        provider = create_ai_provider(config)
-        generated_content = provider.generate(SYSTEM_PROMPT, full_prompt)
-        
-        if not generated_content or len(generated_content) < 100:
-            raise ValueError("生成的内容太短或为空")
-        
-        print(f"[信息] 内容生成完成，长度: {len(generated_content)}字符")
-        
-        # 统计中文字数
-        chinese_chars = count_chinese_chars(generated_content)
-        print(f"[信息] 中文字数: {chinese_chars}字")
-        
-        if chinese_chars < config.get('min_chapter_chars', 3000):
-            print(f"[警告] 字数不足（{chinese_chars} < {config['min_chapter_chars']}），可能需要补充")
-        
-        # 保存到文件
-        save_chapter_content(chapter_file, generated_content, config)
-        
-        # 更新记忆文件（如果启用）
-        if config.get('auto_update_memory', True) and not args.no_update_memory:
-            print("[信息] 正在更新记忆文件...")
-            update_memory_files(project_root, context.chapter_no, generated_content, context)
-        
-        print("\n" + "="*60)
-        print("✅ 章节生成完成！")
-        print("="*60)
-        print(f"📄 章节文件: {chapter_file}")
-        print(f"📝 中文字数: {chinese_chars}字")
-        print(f"📊 AI模型: {config['ai_provider']}/{config['model']}")
-        
-        if config.get('run_gate_check', False) or args.run_gate_check:
-            print("\n[提示] 运行门禁检查...")
-            # 这里可以调用门禁检查脚本
-            # subprocess.run([...])
-        
-        print("\n[下一步建议]")
-        print("1. 审阅生成的内容，必要时进行人工修改")
-        print("2. 执行 /更新记忆 确保记忆文件同步")
-        print("3. 执行 /继续写 进入下一章")
-        
-    except Exception as e:
-        print(f"\n[错误] 生成内容失败: {e}")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
-        sys.exit(1)
+
+    # 输出 JSON 到 stdout
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

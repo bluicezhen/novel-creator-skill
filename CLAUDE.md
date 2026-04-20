@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-本仓库是 **Novel Creator Skill v8.0**，一个中文小说全流程创作技能，核心逻辑：
+本仓库是 **Novel Creator Skill v9.0**（纯 Claude Code Skill 模式），一个中文小说全流程创作技能，核心逻辑：
 
-- **技能定义**：`SKILL.md`（v8.0 主文档，作为 Claude Code 等 AI 工具的 skill 安装使用）
-- **真实执行器**：`scripts/` 目录下的 Python 脚本，承担门禁校验、RAG 检索、联网调研、多LLM写作、流程编排等硬逻辑
+- **技能定义**：`SKILL.md`（v9.0 主文档，作为 Claude Code 的 skill 安装使用）
+- **计算脚本**：`scripts/` 目录下的 Python 脚本，承担门禁校验、RAG 检索、联网调研、流程编排等纯计算逻辑
+- **AI 写作**：由 Claude Code 自身完成，脚本不调用任何外部 API
 - **小说项目数据**：写作时在用户机器的 `<project-root>/` 下生成（不在本仓库内）
 
 ## 常用命令
@@ -24,14 +25,17 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_novel_flow_executor.py
 python3 scripts/novel_flow_executor.py one-click \
   --project-root <项目目录> --title <书名> --genre <题材> --idea <剧情种子>
 
-# 继续写作（执行全链路：检索→写作→门禁→索引更新）
+# 继续写作（两阶段：prepare 收集写作任务 → CC 自身写作 → finalize 门禁收尾）
 python3 scripts/novel_flow_executor.py continue-write \
-  --project-root <项目目录> --query "<新剧情>"
+  --project-root <项目目录> --query "<新剧情>" --phase prepare
+# → 读取输出 JSON，执行 writing_tasks 后 →
+python3 scripts/novel_flow_executor.py continue-write \
+  --project-root <项目目录> --query "<新剧情>" --phase finalize
 
-# 带高级参数的继续写作
+# 带高级参数
 python3 scripts/novel_flow_executor.py continue-write \
   --project-root <项目目录> --query "<新剧情>" \
-  --candidate-k 12 --max-auto-retry-rounds 2 \
+  --phase prepare --candidate-k 12 --max-auto-retry-rounds 2 \
   --rollback-on-failure --idempotent-cache
 
 # 门禁检查
@@ -60,8 +64,8 @@ python3 scripts/auto_novel_writer.py plan --synopsis "<简介>" --target-chars 2
 python3 scripts/auto_novel_writer.py run --project-root <目录> --synopsis "<简介>" --target-chars 2000000
 python3 scripts/auto_novel_writer.py report --project-root <目录>
 
-# 章节写作（多LLM支持）
-python3 scripts/novel_chapter_writer.py --project-root <目录> --provider kimi --dry-run
+# 章节提示词生成
+python3 scripts/novel_chapter_writer.py --project-root <目录>
 
 # 跨工具安装
 bash scripts/install-portable-skill.sh --tool claude-code --force
@@ -77,7 +81,7 @@ novel-creator.json          # JSON 格式技能定义
 scripts/
   novel_flow_executor.py    # 主流程编排器（one-click / continue-write）
   plot_rag_retriever.py     # 两级 RAG 检索（粗筛+精排），零外部依赖
-  novel_chapter_writer.py   # 多LLM章节写作引擎（OpenAI/Claude/Kimi/GLM/MiniMax）
+  novel_chapter_writer.py   # 章节提示词生成器（输出写作请求，由 CC 执行写作）
   research_agent.py         # 通用联网调研工具（关键词生成/缺口检测/资料存储）
   auto_novel_writer.py      # 一键写书调度器（断点续写/进度报告）
   chapter_gate_check.py     # 门禁产物完整性校验
@@ -162,10 +166,10 @@ templates/                  # 小说项目初始化模板文件
 - 资料按类别自动路由到对应知识库文件
 - 适配 Claude Code / OpenCode / Codex 等多种工具
 
-**多LLM写作引擎**（`novel_chapter_writer.py`，v8.0 新增）：
-- 支持 OpenAI / Anthropic / Kimi / GLM / MiniMax / 本地模型 / 任意 OpenAI 兼容 API
-- `write_chapter()` 函数可被外部脚本导入调用
-- 零外部依赖（使用 urllib.request）
+**章节写作引擎**（`novel_chapter_writer.py`，v9.0 纯 Skill 模式）：
+- 生成结构化写作提示词（system_prompt + user_prompt），由 Claude Code 自身执行写作
+- 不调用任何外部 API，零外部依赖
+- `write_chapter()` 函数返回 `{needs_writing: true, prompt, system_prompt}`
 
 **一键写书**（`auto_novel_writer.py`，v8.0 新增）：
 - 全自动调度：调研→开书→循环写作→完成报告

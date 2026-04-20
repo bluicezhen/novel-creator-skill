@@ -62,7 +62,7 @@ description: 中文长篇小说全流程创作技能（v1.0.0）。当用户想�
 | 命令 | 说明 |
 |------|------|
 | `/一键开书` | 输入题材与剧情种子，自动完成建模 + 建库 + 首章准备 |
-| `/继续写` | 自动执行"检索 → 写作 → 门禁 → 索引更新"全链路 |
+| `/继续写` | 两阶段执行：prepare 收集写作任务 → Claude Code 写作 → finalize 门禁收尾 |
 | `/修复本章` | 门禁失败后自动生成最短修复路径 |
 
 新手模式：`/新手模式 开启`（默认）；高级用户：`/新手模式 关闭`
@@ -194,7 +194,7 @@ description: 中文长篇小说全流程创作技能（v1.0.0）。当用户想�
 | 命令 | 功能 | 何时使用 |
 |------|------|---------|
 | `/一键开书` | 自动完成开书全流程 | 第一次开项目 |
-| `/继续写` | 引导剧情走向 → 自动串行完整章节流程 | 日常推进章节 |
+| `/继续写` | 两阶段续写：prepare 收集写作任务 → Claude Code 写作 → finalize 收尾 | 日常推进章节 |
 | `/修复本章` | 门禁失败后自动修复 | 门禁返回失败后 |
 | `/新手模式` | 切换简化/高级交互层 | 按需 |
 
@@ -313,7 +313,8 @@ python3 scripts/novel_flow_executor.py revise-outline \
 | 脚本 | 用途 |
 |------|------|
 | `python3 scripts/novel_flow_executor.py one-click` | `/一键开书` |
-| `python3 scripts/novel_flow_executor.py continue-write --project-root <目录> --query "<新剧情>"` | `/继续写`（全功能默认开启，无需额外参数） |
+| `python3 scripts/novel_flow_executor.py continue-write --project-root <目录> --query "<新剧情>" --phase prepare` | `/继续写` prepare：收集写作任务 |
+| `python3 scripts/novel_flow_executor.py continue-write --project-root <目录> --query "<新剧情>" --phase finalize` | `/继续写` finalize：门禁收尾 / 索引更新 |
 | `python3 scripts/novel_flow_executor.py revise-outline --project-root <目录> --from-chapter <N> --change-description "<说明>"` | `/改纲续写`（锚点重算 + 图谱级联 + RAG 重建） |
 | `python3 scripts/plot_rag_retriever.py build/query` | `/更新剧情索引` `/剧情检索` |
 | `python3 scripts/chapter_gate_check.py` | `/门禁检查` |
@@ -334,17 +335,23 @@ python3 scripts/novel_flow_executor.py revise-outline \
 | `python3 scripts/text_humanizer.py` | AI痕迹检测 / 两遍式润色 prompt 生成（自动集成到章节写作流程） |
 | `python3 scripts/editorial_team_manager.py` | 编辑团队状态管理：快照/审核记录/状态查询/人工介入检测 |
 
-**`continue-write` 标准用法（v1.0.0，全功能默认开启）：**
+**`continue-write` 标准用法（纯 Claude Code Skill 两阶段模式）：**
 
 ```bash
-# 标准用法：知识图谱/大纲锚点/Beat Sheet/AI痕迹纠正/风格更新均自动激活
+# 第一步：prepare —— 收集写作任务，不直接生成正文
 python3 scripts/novel_flow_executor.py continue-write \
-  --project-root <项目目录> --query "<新剧情>"
+  --project-root <项目目录> --query "<新剧情>" --phase prepare
 
-# 高级用户：按需关闭部分功能
+# 第二步：Claude Code 自身根据输出 JSON 执行 writing_tasks，写入对应 output_file / chapter_file
+
+# 第三步：finalize —— 对已写正文执行门禁、修复、索引更新
 python3 scripts/novel_flow_executor.py continue-write \
-  --project-root <项目目录> --query "<新剧情>" \
-  --no-beat-sheet --no-constraints --no-graph-update
+  --project-root <项目目录> --query "<新剧情>" --phase finalize
+
+# 高级参数示例
+python3 scripts/novel_flow_executor.py continue-write \
+  --project-root <项目目录> --query "<新剧情>" --phase prepare \
+  --candidate-k 12 --rollback-on-failure --idempotent-cache
 ```
 
 完整参数说明见 `references/command-playbook.md`。
@@ -526,3 +533,168 @@ python3 scripts/editorial_team_manager.py status --project-root <路径>
 # 检测是否需要人工介入
 python3 scripts/editorial_team_manager.py need-human --project-root <路径>
 ```
+
+## 12. 纯 Claude Code Skill 执行规范
+
+本仓库是**纯 Claude Code Skill 模式**：
+
+- **Claude Code 自身负责写作、润色、审查、修复**
+- **`scripts/` 只负责计算、检索、门禁、约束注入、产物生成**
+- **任何环节都不依赖外部 API Key**
+- **遇到需要生成正文/修复文案的步骤时，应由当前 Claude Code 实例直接完成，不调用外部模型**
+
+### 12.1 `/继续写` 执行规范
+
+收到 `/继续写` 后，Claude Code 必须按以下顺序执行，不得把 prepare 和 finalize 混成单步黑箱。
+
+#### 步骤 1：prepare —— 获取写作请求
+
+运行：
+
+```bash
+python3 scripts/novel_flow_executor.py continue-write \
+  --project-root <项目目录> --query "<新剧情>" --phase prepare
+```
+
+读取 stdout JSON。
+
+若返回：
+
+```json
+{
+  "ok": true,
+  "phase": "prepare",
+  "needs_writing": true,
+  "chapter_file": "...",
+  "writing_tasks": [...]
+}
+```
+
+则表示脚本已完成：
+- RAG 检索
+- 大纲锚点 / 反向刹车 / 事件矩阵 / 图谱约束注入
+- Beat Sheet / 分场景写作任务拆解
+- 章节写作请求生成
+
+此时**不要立刻运行 finalize**，而是先执行写作任务。
+
+#### 步骤 2：Claude Code 自身执行 `writing_tasks`
+
+按 `writing_tasks` 顺序逐个执行，并把结果写入指定文件。
+
+**task_type = `scene_decompose`**
+- 读取 `prompt`
+- 将 beat 拆成 5-7 个微时刻 / 小场景
+- 输出必须聚焦动作、感官、情绪推进
+- 写入 `output_file`
+- 如果 prompt 明确要求 JSON，就输出 JSON；否则按 prompt 约定格式写入
+
+**task_type = `beat_write`**
+- 使用 `system_prompt` 中的人设与写作原则
+- 根据 `prompt` 生成该 beat 的正文
+- 只写小说正文，不得混入分析、注释、TODO、角色设定说明
+- 满足 `word_target` / 节奏约束 / 禁区约束
+- 写入 `output_file`
+
+**task_type = `chapter_write`**
+- 使用 `system_prompt` 中的人设与写作原则
+- 根据 `prompt` 生成完整章节正文
+- 只输出可直接发布的正文
+- 不得包含 `[说明]`、`（注：）`、元叙事分析、分点提示
+- 写入 `chapter_file`
+
+**task_type = `pacing_rewrite`**
+- 这是节奏修复重写请求
+- 直接在原章节基础上重写，不要另起分析文档
+- 保留剧情事实，修复节奏、展开不足、概括跳过过多等问题
+- 覆盖写回 `chapter_file`
+
+#### 步骤 3：finalize —— 门禁收尾
+
+当正文已写入后，再运行：
+
+```bash
+python3 scripts/novel_flow_executor.py continue-write \
+  --project-root <项目目录> --query "<新剧情>" --phase finalize
+```
+
+读取 stdout JSON，重点查看：
+- `ok`
+- `phase`
+- `gate_passed_final`
+- `gate_result`
+- `auto_retry_actions`
+- `repair_result`
+- `writing_constraints`
+
+说明：
+- `ok=true` 表示 **finalize 阶段执行成功**
+- `gate_passed_final=true` 表示 **章节门禁最终通过**
+- 即使 `ok=true`，只要 `gate_passed_final=false`，也仍然**禁止继续写下一章**
+
+#### 步骤 4：若 finalize 后仍需修复
+
+当 finalize 返回门禁失败、修复任务、或 `next_step` 要求补写时：
+
+1. 读取：
+   - `04_editing/gate_artifacts/<chapter_id>/gate_result.json`
+   - `04_editing/gate_artifacts/<chapter_id>/repair_plan.md`
+   - 相关 `copyedit_report.md` / `style_calibration.md` / `publish_ready.md`
+2. 由 Claude Code 自身直接修改章节正文
+3. 修改后重新运行 `--phase finalize`
+4. 直到 `gate_passed_final=true`
+
+### 12.2 `/修复本章` 执行规范
+
+收到 `/修复本章` 时：
+
+1. 先读取当前章节对应的：
+   - `gate_result.json`
+   - `repair_plan.md`
+   - `copyedit_report.md`
+   - `style_calibration.md`
+2. 将失败原因拆成最小修复动作
+3. Claude Code 直接改正文，不写“修复说明混入正文”
+4. 改完后重新执行门禁收尾（本质上等同再次 `continue-write --phase finalize`）
+
+### 12.3 `/风格校准` 执行规范
+
+`/风格校准` 由 Claude Code 自身完成，不调用外部模型。
+
+执行要求：
+- 读取当前章节正文
+- 对照题材、既有章节、风格档案，检查：
+  - 叙述基调是否漂移
+  - 句长节奏是否失衡
+  - 对话比例是否异常
+  - 用词是否偏离题材基线
+- 产出 `style_calibration.md`
+- 若发现明显漂移，直接给出可执行修改建议；必要时直接修正文稿，再进入后续门禁
+
+### 12.4 `/校稿` 执行规范
+
+`/校稿` 由 Claude Code 自身完成，必须执行两遍式流程：
+
+**第一遍：清除 AI 模式**
+- 删除或改写高频套话、翻译腔、意义膨胀、正式语体、排比三连、弱化副词泛滥等问题
+
+**第二遍：自审残留 AI 感**
+- 重新通读修改稿
+- 明确指出剩余 3-5 个最显著的 AI 痕迹
+- 再做一轮最小必要修改
+
+产出要求：
+- 写入 `copyedit_report.md`
+- 如需给出发布结论，同时更新 `publish_ready.md`
+- 保持“最小改动原则”，不要无故改剧情事实
+
+### 12.5 输出纪律
+
+在纯 Skill 模式下，Claude Code 执行写作相关任务时必须遵守：
+
+- 正文就是正文，不夹带分析
+- 报告就是报告，不污染正文
+- 任何需要解释思路的内容，只能写入门禁产物或对话回复，不能写进章节文件
+- 不得伪造“已调用某模型/某 API”
+- 不得要求用户配置 API Key 才能继续
+

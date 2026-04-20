@@ -1,10 +1,10 @@
 # Novel Claude AI - 小说创作大师
 
-> **版本**: v1.0.0
-> **状态**: 生产可用
+> **版本**: v9.0.0
+> **模式**: 纯 Claude Code Skill（无需外部 API Key）
 > **支持工具**: Claude Code / Codex / OpenCode / Gemini CLI / Antigravity
 
-中文长篇小说全流程创作技能，覆盖从模糊想法到300万字成品的完整链路。
+中文长篇小说全流程创作技能，覆盖从模糊想法到300万字成品的完整链路。**所有 AI 写作由 Claude Code 自身完成，无需购买任何外部 API 额度。**
 
 ---
 
@@ -19,7 +19,7 @@
 - [新手三命令](#新手三命令)
 - [完整命令参考](#完整命令参考)
 - [项目目录结构](#项目目录结构)
-- [多LLM配置](#多llm配置)
+- [写作配置](#写作配置)
 - [常见问题](#常见问题)
 
 ---
@@ -365,11 +365,14 @@ bash scripts/install-portable-skill.sh --tool claude-code --force
 # 步骤2：一键开书
 /一键开书 书名="穿越大唐之我是皇帝" 题材=历史 剧情种子="现代大学生穿越到唐朝成为太子，利用现代知识治国平天下"
 
-# 步骤3：继续写
+# 步骤3：继续写（两阶段）
 /继续写 "太子在朝堂上首次发言，引起百官震动"
+# → Claude Code 先执行 prepare，拿到 writing_tasks
+# → Claude Code 自身完成正文写作
+# → 再执行 finalize 完成门禁与索引更新
 ```
 
-系统会自动完成：世界观建模 → 知识库初始化 → 章节写作 → 门禁校验 → 索引更新。
+系统会自动串联：世界观建模 → 知识库初始化 → prepare 收集写作任务 → Claude Code 写作 → finalize 门禁校验 → 索引更新。
 
 ---
 
@@ -424,19 +427,20 @@ bash scripts/install-portable-skill.sh --tool claude-code --force
 
 ### `/继续写`
 
-执行完整的写作-校验流程。
+执行两阶段写作-校验流程。
 
 ```
 /继续写 "本章要写的剧情方向"
 ```
 
-**执行内容**（全自动串联）：
+**执行内容**：
 1. 续写前引导（询问剧情走向偏好）
-2. RAG检索相关章节上下文
-3. 大纲锚点配额检查
-4. Beat Sheet生成与扩写
-5. 章节合成与门禁校验
-6. 知识图谱回写与索引更新
+2. prepare：RAG检索相关章节上下文
+3. prepare：大纲锚点配额检查
+4. prepare：Beat Sheet生成与扩写任务拆解
+5. Claude Code 自身执行 writing_tasks，写入正文/中间文件
+6. finalize：章节门禁校验
+7. finalize：知识图谱回写与索引更新
 
 ### `/修复本章`
 
@@ -446,7 +450,7 @@ bash scripts/install-portable-skill.sh --tool claude-code --force
 /修复本章
 ```
 
-系统根据 `repair_plan.md` 中的修复建议，自动修复章节问题并重新提交门禁。
+系统读取 `repair_plan.md`、`gate_result.json` 等门禁产物，由 Claude Code 自身修复章节问题后重新执行 finalize。
 
 ---
 
@@ -457,8 +461,8 @@ bash scripts/install-portable-skill.sh --tool claude-code --force
 | 命令 | 功能 | 何时使用 |
 |------|------|---------|
 | `/一键开书` | 自动完成开书全流程 | 第一次开项目 |
-| `/继续写` | 引导剧情走向并完成章节流程 | 日常推进章节 |
-| `/修复本章` | 门禁失败后自动修复 | 门禁返回失败后 |
+| `/继续写` | 两阶段续写：prepare 收集写作任务 → Claude Code 写作 → finalize 收尾 | 日常推进章节 |
+| `/修复本章` | 门禁失败后读取修复产物并重新 finalize | 门禁返回失败后 |
 | `/新手模式` | 切换简化/高级交互层 | 按需 |
 
 ### 创作命令
@@ -556,56 +560,28 @@ bash scripts/install-portable-skill.sh --tool claude-code --force
 
 ---
 
-## 多LLM配置
+## 写作配置
 
-在项目根目录创建 `.novel_writer_config.yaml`：
+本项目为纯 Claude Code Skill 模式，**无需任何外部 API Key**。Claude Code 自身作为写作者完成所有 AI 生成任务。
 
-### OpenAI（默认）
-
-```yaml
-ai_provider: openai
-model: gpt-4
-openai_api_key: "sk-..."
-```
-
-### Anthropic (Claude)
+在项目根目录创建 `.novel_writer_config.yaml` 可覆盖默认写作参数：
 
 ```yaml
-ai_provider: anthropic
-model: claude-3-sonnet-20240229
+# 章节最小字数（中文字符）
+min_chapter_chars: 3000
+
+# 章节目标字数
+target_chapter_chars: 3500
+
+# 加载前几章作为上下文
+context_window: 5
+
+# 是否保持风格一致性
+style_consistency: true
+
+# 自动生成后是否更新记忆文件
+auto_update_memory: true
 ```
-
-### Kimi 2.5
-
-```yaml
-ai_provider: kimi
-model: moonshot-v1-auto
-```
-
-### GLM-5
-
-```yaml
-ai_provider: glm
-model: glm-4-plus
-```
-
-### 本地模型
-
-```yaml
-ai_provider: local
-model: qwen2.5:72b
-local_api_url: "http://localhost:11434/api/generate"
-```
-
-### 环境变量
-
-| LLM | 环境变量 |
-|-----|----------|
-| OpenAI | `OPENAI_API_KEY` |
-| Anthropic | `ANTHROPIC_API_KEY` |
-| Kimi | `MOONSHOT_API_KEY` |
-| GLM | `GLM_API_KEY` |
-| MiniMax | `MINIMAX_API_KEY` |
 
 ---
 
@@ -618,7 +594,7 @@ A: 确认安装脚本输出无错误。重启AI工具后重试。检查SKILL.md�
 A: 使用 `/修复本章` 自动修复。查看 `04_editing/gate_artifacts/<章节>/gate_result.json` 了解具体失败原因。
 
 ### Q: 如何切换大模型？
-A: 修改项目根目录的 `.novel_writer_config.yaml`，更改 `ai_provider` 和 `model` 字段。
+A: 本项目为纯 Claude Code Skill 模式，所有写作由 Claude Code 自身完成，无需配置外部模型。
 
 ### Q: 一键写书中断了怎么办？
 A: 直接再次执行 `/一键写书`，系统会自动检测断点并恢复。状态保存在 `.flow/auto_write_state.json`。
@@ -674,9 +650,13 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_novel_flow_executor.py
 python3 scripts/novel_flow_executor.py one-click \
   --project-root ./我的小说 --title "书名" --genre 历史 --idea "剧情种子"
 
-# 继续写作
+# 继续写作：prepare 阶段（收集写作任务）
 python3 scripts/novel_flow_executor.py continue-write \
-  --project-root ./我的小说 --query "新剧情"
+  --project-root ./我的小说 --query "新剧情" --phase prepare
+
+# Claude Code 根据输出 JSON 完成正文写作后，再执行 finalize
+python3 scripts/novel_flow_executor.py continue-write \
+  --project-root ./我的小说 --query "新剧情" --phase finalize
 
 # 门禁检查
 python3 scripts/chapter_gate_check.py \
