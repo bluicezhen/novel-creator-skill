@@ -236,7 +236,7 @@ description: 中文长篇小说全流程创作技能（v1.0.0）。当用户想�
 
 **脚本执行**：
 ```bash
-python3 scripts/novel_flow_executor.py revise-outline \
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py revise-outline \
   --project-root <项目目录> \
   --from-chapter <起始章节号> \
   --change-description "<本次改纲的简要说明>" \
@@ -312,44 +312,44 @@ python3 scripts/novel_flow_executor.py revise-outline \
 
 | 脚本 | 用途 |
 |------|------|
-| `python3 scripts/novel_flow_executor.py one-click` | `/一键开书` |
-| `python3 scripts/novel_flow_executor.py continue-write --project-root <目录> --query "<新剧情>" --phase prepare` | `/继续写` prepare：收集写作任务 |
-| `python3 scripts/novel_flow_executor.py continue-write --project-root <目录> --query "<新剧情>" --phase finalize` | `/继续写` finalize：门禁收尾 / 索引更新 |
-| `python3 scripts/novel_flow_executor.py revise-outline --project-root <目录> --from-chapter <N> --change-description "<说明>"` | `/改纲续写`（锚点重算 + 图谱级联 + RAG 重建） |
-| `python3 scripts/plot_rag_retriever.py build/query` | `/更新剧情索引` `/剧情检索` |
-| `python3 scripts/chapter_gate_check.py` | `/门禁检查` |
-| `python3 scripts/gate_repair_plan.py` | `/修复本章` |
-| `python3 scripts/auto_novel_writer.py` | `/一键写书` |
-| `python3 scripts/style_fingerprint.py` | `/风格提取` |
-| `python3 scripts/research_agent.py` | `/联网调研` |
-| `python3 scripts/benchmark_novel_flow.py` | `/评测基线` |
-| `python3 scripts/story_graph_builder.py` | 知识图谱 CRUD / 校验 / Mermaid 导出 |
-| `python3 scripts/outline_anchor_manager.py` | 大纲锚点初始化 / 配额检查 / 推进 |
-| `python3 scripts/event_matrix_scheduler.py` | 事件矩阵冷却 / 推荐 / 记录 |
-| `python3 scripts/anti_resolution_guard.py` | 反向刹车校验 / 约束 prompt 生成 |
-| `python3 scripts/beat_sheet_generator.py` | Beat Sheet 生成 / 扩写提示 / 校验 |
-| `python3 scripts/chapter_synthesizer.py` | 章节合成 / 合成稿质量校验 |
-| `python3 scripts/cross_agent_reviewer.py` | 跨Agent审核任务生成 / 结果记录 |
-| `python3 scripts/story_graph_updater.py` | 章节完成后自动提取信息更新图谱 |
-| `python3 scripts/interactive_ideation_engine.py` | 交互式脑洞引导 5 轮收敛 / 产出物生成 |
-| `python3 scripts/text_humanizer.py` | AI痕迹检测 / 两遍式润色 prompt 生成（自动集成到章节写作流程） |
-| `python3 scripts/editorial_team_manager.py` | 编辑团队状态管理：快照/审核记录/状态查询/人工介入检测 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py one-click` | `/一键开书` |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py continue-write --project-root <目录> --query "<新剧情>" --phase prepare` | `/继续写` prepare：收集写作任务 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py continue-write --project-root <目录> --query "<新剧情>" --phase finalize` | `/继续写` finalize：门禁收尾 / 索引更新 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py revise-outline --project-root <目录> --from-chapter <N> --change-description "<说明>"` | `/改纲续写`（锚点重算 + 图谱级联 + RAG 重建） |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/plot_rag_retriever.py build/query` | `/更新剧情索引` `/剧情检索` |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/chapter_gate_check.py` | `/门禁检查` |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/gate_repair_plan.py` | `/修复本章` |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/auto_novel_writer.py` | `/一键写书` |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/style_fingerprint.py` | `/风格提取` |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/research_agent.py` | `/联网调研` |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/benchmark_novel_flow.py` | `/评测基线` |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/story_graph_builder.py` | 知识图谱 CRUD / 校验 / Mermaid 导出 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/outline_anchor_manager.py` | 大纲锚点初始化 / 配额检查 / 推进 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/event_matrix_scheduler.py` | 事件矩阵冷却 / 推荐 / 记录 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/anti_resolution_guard.py` | 反向刹车校验 / 约束 prompt 生成 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/beat_sheet_generator.py` | Beat Sheet 生成 / 扩写提示 / 校验 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/chapter_synthesizer.py` | 章节合成 / 合成稿质量校验 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/cross_agent_reviewer.py` | 跨Agent审核任务生成 / 结果记录 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/story_graph_updater.py` | 章节完成后自动提取信息更新图谱 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/interactive_ideation_engine.py` | 交互式脑洞引导 5 轮收敛 / 产出物生成 |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/text_humanizer.py` | AI痕迹检测 / 两遍式润色 prompt 生成（自动集成到章节写作流程） |
+| `python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/editorial_team_manager.py` | 编辑团队状态管理：快照/审核记录/状态查询/人工介入检测 |
 
 **`continue-write` 标准用法（纯 Claude Code Skill 两阶段模式）：**
 
 ```bash
 # 第一步：prepare —— 收集写作任务，不直接生成正文
-python3 scripts/novel_flow_executor.py continue-write \
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py continue-write \
   --project-root <项目目录> --query "<新剧情>" --phase prepare
 
 # 第二步：Claude Code 自身根据输出 JSON 执行 writing_tasks，写入对应 output_file / chapter_file
 
 # 第三步：finalize —— 对已写正文执行门禁、修复、索引更新
-python3 scripts/novel_flow_executor.py continue-write \
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py continue-write \
   --project-root <项目目录> --query "<新剧情>" --phase finalize
 
 # 高级参数示例
-python3 scripts/novel_flow_executor.py continue-write \
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py continue-write \
   --project-root <项目目录> --query "<新剧情>" --phase prepare \
   --candidate-k 12 --rollback-on-failure --idempotent-cache
 ```
@@ -424,7 +424,7 @@ python3 scripts/novel_flow_executor.py continue-write \
 
 ```
 步骤 0：准备上下文快照
-  python3 scripts/editorial_team_manager.py snapshot --project-root <路径>
+  python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/editorial_team_manager.py snapshot --project-root <路径>
   → 读取输出中的 context_file 路径和 current_chapter_no
 
 步骤 1：创建团队
@@ -454,7 +454,7 @@ python3 scripts/novel_flow_executor.py continue-write \
   - 如有 P0 → 返工（最多2次）
   - 无 P0 → 使用反AI编辑润色后的版本
   - 记录结果：
-    python3 scripts/editorial_team_manager.py record-review \
+    python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/editorial_team_manager.py record-review \
       --project-root <路径> --chapter N --stage final --verdict pass/conditional/rewrite \
       --p0 X --p1 Y --p2 Z
 
@@ -462,7 +462,7 @@ python3 scripts/novel_flow_executor.py continue-write \
   将 FINAL_CHAPTER_PACKAGE 写入 03_manuscript/第N章-[标题].md
 
 步骤 7：检查是否需要人工介入
-  python3 scripts/editorial_team_manager.py need-human --project-root <路径>
+  python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/editorial_team_manager.py need-human --project-root <路径>
   → 如 need_human=true，暂停并向用户汇报
 
 步骤 8：关闭团队
@@ -520,18 +520,18 @@ python3 scripts/novel_flow_executor.py continue-write \
 
 ```bash
 # 生成上下文快照（团队启动前必须运行）
-python3 scripts/editorial_team_manager.py snapshot --project-root <路径>
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/editorial_team_manager.py snapshot --project-root <路径>
 
 # 记录单次审核结果
-python3 scripts/editorial_team_manager.py record-review \
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/editorial_team_manager.py record-review \
   --project-root <路径> --chapter N --stage final \
   --verdict pass --p0 0 --p1 2 --p2 3
 
 # 查看最近10章审核历史
-python3 scripts/editorial_team_manager.py status --project-root <路径>
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/editorial_team_manager.py status --project-root <路径>
 
 # 检测是否需要人工介入
-python3 scripts/editorial_team_manager.py need-human --project-root <路径>
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/editorial_team_manager.py need-human --project-root <路径>
 ```
 
 ## 12. 纯 Claude Code Skill 执行规范
@@ -552,7 +552,7 @@ python3 scripts/editorial_team_manager.py need-human --project-root <路径>
 运行：
 
 ```bash
-python3 scripts/novel_flow_executor.py continue-write \
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py continue-write \
   --project-root <项目目录> --query "<新剧情>" --phase prepare
 ```
 
@@ -614,7 +614,7 @@ python3 scripts/novel_flow_executor.py continue-write \
 当正文已写入后，再运行：
 
 ```bash
-python3 scripts/novel_flow_executor.py continue-write \
+python3 /home/ubuntu/.claude/skills/novel-creator-skill/scripts/novel_flow_executor.py continue-write \
   --project-root <项目目录> --query "<新剧情>" --phase finalize
 ```
 
