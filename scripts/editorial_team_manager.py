@@ -151,7 +151,7 @@ def cmd_status(project_root: Path, last_n: int = 10) -> None:
         print(json.dumps({"ok": True, "message": "暂无审核记录"}, ensure_ascii=False))
         return
 
-    recent = log[-last_n * 5:]  # 最多每章5步，取最近N章数据
+    recent = log[-last_n * 6:]  # 最多每章6步，取最近N章数据
     by_chapter: Dict[int, List[Dict]] = {}
     for entry in recent:
         cn = entry["chapter_no"]

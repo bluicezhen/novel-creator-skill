@@ -123,8 +123,8 @@ class TestNovelFlowExecutor(unittest.TestCase):
         self.assertTrue(payload.get("ok"))
         self.assertEqual(payload.get("phase"), "finalize")
 
-    def test_continue_write_idempotent_cache_hit(self):
-        """重复 prepare 请求应命中幂等缓存。"""
+
+    def test_prepare_reuses_latest_stub_instead_of_skipping_ahead(self):
         run_cmd([
             "one-click",
             "--project-root",
@@ -136,32 +136,78 @@ class TestNovelFlowExecutor(unittest.TestCase):
             "--idea",
             "主角在旧港区发现失踪名单",
         ])
-        _, p1 = run_cmd([
+        chapter1 = self.tmpdir / "03_manuscript" / "第1章-开篇待写.md"
+        chapter1.write_text(
+            "# 第1章 开篇\n\n主角已经写完的正文。\n\n第二段。\n\n第三段。",
+            encoding="utf-8",
+        )
+        chapter2 = self.tmpdir / "03_manuscript" / "第2章-待写.md"
+        chapter2.write_text("# 第2章 待写\n\n<!-- NOVEL_FLOW_STUB -->\n\n## 正文\n[待写]\n", encoding="utf-8")
+
+        _, payload = run_cmd([
             "continue-write",
             "--project-root",
             str(self.tmpdir),
             "--query",
-            "主角在站台发现名单并与同伴发生冲突",
+            "继续推进第2章剧情",
             "--phase",
             "prepare",
-            "--idempotent-cache",
         ])
-        _, p2 = run_cmd([
+        self.assertTrue(payload.get("ok"))
+        self.assertEqual(payload.get("chapter_file"), str(chapter2.resolve()))
+        self.assertEqual(payload.get("chapter_resolution_reason"), "reuse_latest_stub")
+
+    def test_finalize_reuses_same_chapter_after_stub_filled(self):
+        run_cmd([
+            "one-click",
+            "--project-root",
+            str(self.tmpdir),
+            "--title",
+            "雾港回声",
+            "--genre",
+            "悬疑",
+            "--idea",
+            "主角在旧港区发现失踪名单",
+        ])
+        chapter1 = self.tmpdir / "03_manuscript" / "第1章-开篇待写.md"
+        chapter1.write_text(
+            "# 第1章 开篇\n\n主角已经写完的正文。\n\n第二段。\n\n第三段。",
+            encoding="utf-8",
+        )
+        chapter2 = self.tmpdir / "03_manuscript" / "第2章-待写.md"
+        chapter2.write_text("# 第2章 待写\n\n<!-- NOVEL_FLOW_STUB -->\n\n## 正文\n[待写]\n", encoding="utf-8")
+
+        _, prepare_payload = run_cmd([
             "continue-write",
             "--project-root",
             str(self.tmpdir),
-            "--chapter-file",
-            p1.get("chapter_file"),
             "--query",
-            "主角在站台发现名单并与同伴发生冲突",
+            "继续推进第2章剧情",
             "--phase",
             "prepare",
-            "--idempotent-cache",
         ])
-        self.assertTrue(p1.get("ok"))
-        self.assertTrue(p2.get("ok"))
-        # 幂等缓存命中时返回 idempotent_hit=true
-        self.assertTrue(p2.get("idempotent_hit"))
+        self.assertEqual(prepare_payload.get("chapter_file"), str(chapter2.resolve()))
+
+        chapter2.write_text(
+            "# 第2章 待写\n\n主角继续调查，发现新的异常。\n\n他没有立刻下结论，只先把线索记下来。\n\n街上的风更冷了，事情却更乱了。\n\n他知道自己得继续查下去。\n",
+            encoding="utf-8",
+        )
+        _, finalize_payload = run_cmd([
+            "continue-write",
+            "--project-root",
+            str(self.tmpdir),
+            "--query",
+            "继续推进第2章剧情",
+            "--phase",
+            "finalize",
+            "--min-chars", "50",
+            "--min-paragraphs", "2",
+            "--min-sentences", "3",
+        ])
+        self.assertTrue(finalize_payload.get("ok"))
+        self.assertEqual(finalize_payload.get("chapter_file"), str(chapter2.resolve()))
+        self.assertIn(finalize_payload.get("chapter_resolution_reason"), {"reuse_recent_prepare_target", "reuse_latest_stub"})
+        self.assertFalse((self.tmpdir / "03_manuscript" / "第3章-待写.md").exists())
 
     def test_continue_write_rollback_on_failure(self):
         """finalize 阶段门禁失败且启用回滚时，章节内容应被恢复。"""

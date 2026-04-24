@@ -208,7 +208,7 @@ def extract_chapter_number(raw: str) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="检查章节是否完成强制门禁：更新记忆→一致性→风格校准→校稿")
+    p = argparse.ArgumentParser(description="检查章节是否完成强制门禁：更新记忆→一致性→节奏审查→风格校准→校稿→门禁检查")
     p.add_argument("--project-root", required=True, help="小说项目根目录")
     p.add_argument("--chapter-file", required=True, help="章节文件路径（可相对 project-root）")
     p.add_argument("--chapter-id", help="章节标识；默认从章节文件名推导")

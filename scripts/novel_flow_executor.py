@@ -558,6 +558,34 @@ def save_continue_cache(flow_dir: Path, cache: Dict[str, object]) -> None:
     save_json(flow_dir / FLOW_CACHE_FILE, cache)
 
 
+def resolve_recent_prepared_chapter(flow_dir: Path, query: str) -> Optional[Path]:
+    cache = load_continue_cache(flow_dir)
+    entries = cache.get("entries", {})
+    if not isinstance(entries, dict):
+        return None
+    candidates = []
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+        if result.get("phase") != "prepare":
+            continue
+        if result.get("chapter_resolution_reason") not in {"reuse_latest_stub", "explicit_chapter_file"}:
+            continue
+        if str(result.get("query", "")).strip() != query.strip():
+            continue
+        chapter_file = str(result.get("chapter_file", "")).strip()
+        saved_at = str(entry.get("saved_at", ""))
+        if chapter_file:
+            candidates.append((saved_at, chapter_file))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return Path(candidates[0][1]).expanduser().resolve()
+
+
 def update_flow_metrics(project_root: Path, item: Dict[str, object]) -> Dict[str, object]:
     retrieval_dir = project_root / "00_memory" / "retrieval"
     ensure_dir(retrieval_dir)
@@ -607,10 +635,28 @@ def latest_chapter(manuscript_dir: Path) -> Optional[Path]:
     return files[-1] if files else None
 
 
+def list_chapters(manuscript_dir: Path) -> List[Path]:
+    return sorted(manuscript_dir.glob("*.md"), key=lambda p: (chapter_no_from_name(p.name), p.name))
+
+
+def resolve_active_chapter(manuscript_dir: Path, phase: str, title: str = "待写") -> Tuple[Path, str, bool]:
+    files = list_chapters(manuscript_dir)
+    if not files:
+        return (manuscript_dir / f"第1章-{title}.md", "no_chapters_create_first", True)
+
+    stub_files = [p for p in files if chapter_is_draft_stub(p)]
+    if stub_files:
+        latest_stub = stub_files[-1]
+        return latest_stub, "reuse_latest_stub", False
+
+    latest = files[-1]
+    next_no = chapter_no_from_name(latest.name) + 1 if latest else 1
+    return (manuscript_dir / f"第{next_no}章-{title}.md", "create_next_after_latest_complete", True)
+
+
 def next_chapter_filename(manuscript_dir: Path, title: str = "待写") -> str:
-    cur = latest_chapter(manuscript_dir)
-    next_no = chapter_no_from_name(cur.name) + 1 if cur else 1
-    return f"第{next_no}章-{title}.md"
+    chapter_path, _, _ = resolve_active_chapter(manuscript_dir, phase="prepare", title=title)
+    return chapter_path.name
 
 
 def write_if_needed(path: Path, content: str, overwrite: bool, changed: List[str], skipped: List[str]) -> None:
@@ -1630,6 +1676,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
 
     started_at = time.time()
     query = args.query.strip() if args.query else "推进下一章剧情"
+    phase = getattr(args, "phase", "prepare")
     # 节奏模式：同步提升最低字数门槛
     pacing_mode = _resolve_pacing_mode(getattr(args, "pacing_mode", "standard"))
     args.pacing_mode = pacing_mode
@@ -1659,16 +1706,35 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             query_cmd.append("--force")
         q_code, q_out, q_err, q_payload = run_python(SCRIPT_DIR / "plot_rag_retriever.py", query_cmd)
 
+        created_chapter_stub = False
+        chapter_resolution_reason = "explicit_chapter_file"
+        should_create_stub = False
         if args.chapter_file:
             chapter_path, path_error = validate_chapter_path(project_root, args.chapter_file)
             if path_error:
                 return {"ok": False, "error": path_error}
         else:
-            chapter_path = (manuscript_dir / next_chapter_filename(manuscript_dir, title=args.chapter_title)).resolve()
+            if phase == "finalize":
+                recent_prepared = resolve_recent_prepared_chapter(flow_dir, query)
+                if recent_prepared and recent_prepared.exists() and recent_prepared.parent == manuscript_dir:
+                    chapter_path = recent_prepared
+                    chapter_resolution_reason = "reuse_recent_prepare_target"
+                else:
+                    chapter_path, chapter_resolution_reason, should_create_stub = resolve_active_chapter(
+                        manuscript_dir,
+                        phase=phase,
+                        title=args.chapter_title,
+                    )
+                    chapter_path = chapter_path.resolve()
+            else:
+                chapter_path, chapter_resolution_reason, should_create_stub = resolve_active_chapter(
+                    manuscript_dir,
+                    phase=phase,
+                    title=args.chapter_title,
+                )
+                chapter_path = chapter_path.resolve()
         original_chapter_path = chapter_path
-
-        created_chapter_stub = False
-        if not chapter_path.exists():
+        if should_create_stub and not chapter_path.exists():
             created_chapter_stub = True
             write_text(
                 chapter_path,
@@ -1850,6 +1916,8 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                         "phase": "prepare",
                         "needs_writing": bool(writing_tasks),
                         "chapter_file": str(chapter_path) if chapter_path else "",
+                        "chapter_resolution_reason": chapter_resolution_reason,
+                        "query": query,
                     },
                 }
                 save_continue_cache(flow_dir, cache)
@@ -1861,6 +1929,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                 "command": "continue-write",
                 "project_root": str(project_root),
                 "chapter_file": str(chapter_path) if chapter_path else "",
+                "chapter_resolution_reason": chapter_resolution_reason,
                 "writing_tasks": writing_tasks,
                 "writing_constraints": writing_constraints,
                 "pacing_mode": pacing_mode,
@@ -1871,6 +1940,28 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
 
         draft_mode = chapter_is_draft_stub(chapter_path)
 
+        if phase == "finalize" and draft_mode:
+            runtime_ms = round((time.time() - started_at) * 1000, 2)
+            return {
+                "ok": True,
+                "phase": "finalize",
+                "command": "continue-write",
+                "project_root": str(project_root),
+                "chapter_file": str(chapter_path) if chapter_path else "",
+                "chapter_resolution_reason": chapter_resolution_reason,
+                "created_chapter_stub": created_chapter_stub,
+                "auto_draft_applied": auto_draft_applied,
+                "draft_provider_used": draft_provider_used,
+                "fallback_applied": fallback_applied,
+                "llm_error_msg": llm_error_msg,
+                "awaiting_draft": True,
+                "gate_result": None,
+                "gate_passed_final": False,
+                "next_step": "目标章节仍是待写 stub，请先补全该章节正文，或显式传 --chapter-file 指定要 finalize 的章节。",
+                "run_id": run_id,
+                "runtime_ms": runtime_ms,
+            }
+
         chapter_id = slugify(chapter_path.stem)
         gate_dir = project_root / "04_editing" / "gate_artifacts" / chapter_id
         ensure_dir(gate_dir)
@@ -1878,7 +1969,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
         if not todo_file.exists():
             write_text(
                 todo_file,
-                "# 章节流程待办\n\n- [ ] /更新记忆\n- [ ] /检查一致性\n- [ ] /风格校准\n- [ ] /校稿\n- [ ] /门禁检查\n- [ ] /更新剧情索引\n",
+                "# 章节流程待办\n\n- [ ] /更新记忆\n- [ ] /检查一致性\n- [ ] /节奏审查\n- [ ] /风格校准\n- [ ] /校稿\n- [ ] /门禁检查\n- [ ] /更新剧情索引\n",
             )
 
         quality_before = evaluate_quality(read_text(chapter_path), args)
@@ -2070,7 +2161,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             "command": "continue-write",
             "project_root": str(project_root),
             "chapter_file": str(chapter_path) if chapter_path else "",
-            "pacing_mode": pacing_mode,
+            "chapter_resolution_reason": chapter_resolution_reason,
             "created_chapter_stub": created_chapter_stub,
             "auto_draft_applied": auto_draft_applied,
             "draft_provider_used": draft_provider_used,

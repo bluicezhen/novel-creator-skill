@@ -4,9 +4,12 @@
 每章固定顺序：
 1. `/更新记忆`
 2. `/检查一致性`
-3. `/风格校准`
-4. `/校稿`
-5. `/门禁检查`
+3. `/节奏审查`
+4. `/风格校准`
+5. `/校稿`
+6. `/门禁检查`
+
+推荐直接执行聚合命令：`/门禁闭环`。
 
 门禁失败规则：`/门禁检查` 未通过，章节状态必须保持草稿。
 
@@ -26,7 +29,7 @@
 `/继续写`
 - 输入：本章目标、冲突、角色（均可选）。
 - 输出：自动完成“检索→写作→门禁→索引更新”。
-- 自动流程：`/剧情检索`（条件触发）→ `/写作` → `/更新记忆` → `/检查一致性` → `/风格校准` → `/校稿` → `/门禁检查` → `/更新剧情索引`。
+- 自动流程：`/剧情检索`（条件触发）→ `/写作` → `/更新记忆` → `/检查一致性` → `/节奏审查` → `/风格校准` → `/校稿` → `/门禁检查` → `/更新剧情索引`。
 - 执行：`python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query "<新剧情>"`
 - 进阶执行：`python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query "<新剧情>" --candidate-k 12 --max-auto-retry-rounds 2 --rollback-on-failure --idempotent-cache`
 - 说明：默认启用执行锁、幂等缓存、写前快照、失败回滚；若章节已成稿会自动触发门禁与最小修复联动。
@@ -93,6 +96,13 @@
 - 输出：记忆系统与知识库初始化（章节目录为 `03_manuscript/`，知识库目录为 `02_knowledge_base/`）。
 
 ## 4. 质量命令（每章必经）
+
+`/门禁闭环`
+- 输入：项目目录 + 章节文件。
+- 输出：依次补齐六步门禁产物，并最终运行 `/门禁检查`。
+- 产物：`memory_update.md`、`consistency_report.md`、`pacing_review.md`、`style_calibration.md`、`copyedit_report.md`、`publish_ready.md`、`gate_result.json`。
+- 失败规则：任一步失败立即停止；`gate_result.json passed != true` 时只能执行 `/修复本章`。
+
 `/更新记忆`
 - 输入：本章正文。
 - 输出：`novel_state.md`、追踪器、摘要更新。
@@ -102,6 +112,11 @@
 - 输入：本章正文 + 当前记忆文件。
 - 输出：一致性风险清单 + 修正建议。
 - 产物：`04_editing/gate_artifacts/<chapter_id>/consistency_report.md`
+
+`/节奏审查`
+- 输入：本章正文 + 当前大纲/状态。
+- 输出：档位判断、A/B/C 配额核查、章末悬念质量、隐性加速检测。
+- 产物：`04_editing/gate_artifacts/<chapter_id>/pacing_review.md`
 
 `/风格校准`
 - 输入：本章正文 + `style_anchor.md`。
